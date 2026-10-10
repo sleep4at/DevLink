@@ -1,0 +1,38 @@
+/********************************** (C) COPYRIGHT *******************************
+* File Name          : rf_uart_rx.h
+* Author             : WCH
+* Version            : V1.0
+* Date               : 2022/03/10
+* Description        : 
+*******************************************************************************/
+
+#ifndef __RF_UART_RX_H
+#define __RF_UART_RX_H
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+#include <CH572rf.h>
+#include "CH57x_common.h"
+#include "buf.h"
+
+#define   RF_BUF_LEN   1536  /* single-role Host: 1.5 KiB, leaves stack margin */
+
+
+#define  CONN_INTERVAL     10
+#define  CONN_TIMEOUT      100
+#define  CONN_PHY_TYPE     1   // 2M
+
+void RF_UartRxInit( void );
+uint8_t RF_RxQuery( void *buf, typeBufSize *len );
+uint8_t Host_BootRequestTake( void );
+extern volatile uint32_t gRfBackpressureCount;
+extern volatile uint32_t gRfCreditZeroCount;
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
