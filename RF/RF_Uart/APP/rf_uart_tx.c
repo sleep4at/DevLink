@@ -59,6 +59,14 @@ struct simple_buf *pRfBuf = NULL;
 uint8_t volatile RF_bound_Flag;
 static volatile uint8_t gBootPulsePending;
 static volatile uint8_t gBootPulseSendSync;
+static volatile uint8_t gDeviceLedPhase;
+static volatile uint32_t gDeviceLedUntil;
+
+void DeviceLedActivity( void )
+{
+    gDeviceLedPhase ^= 1u;
+    gDeviceLedUntil = SYS_GetSysTickCnt() + GetSysClock() / 20u;
+}
 
 /* Advertise UART-output queue space to the Host in 16-byte units. */
 static uint8_t Device_RfCredit( void )
@@ -117,6 +125,7 @@ static void Device_LedTask( void )
     static uint32_t last_toggle;
     uint8_t bound = (RF_bound_Flag != 0);
     uint32_t now = SYS_GetSysTickCnt();
+    uint8_t active = ((int32_t)(now - gDeviceLedUntil) < 0);
 
     if( bound != last_bound )
     {
@@ -136,8 +145,10 @@ static void Device_LedTask( void )
     }
     else
     {
-        /* Device role is the active-low LED in the user's dual-LED wiring. */
-        GPIOA_ResetBits( LED_PIN );
+        /* Device role is active-low; wireless activity briefly selects the
+         * other LED, then the role indicator returns after 50 ms. */
+        if( bound && active && gDeviceLedPhase ) GPIOA_SetBits( LED_PIN );
+        else GPIOA_ResetBits( LED_PIN );
         GPIOA_ModeCfg( LED_PIN, GPIO_ModeOut_PP_5mA );
     }
 }
@@ -380,9 +391,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
                         PFIC_SetPendingIRQ( UART_IRQn );
                     }
                 }
-#if(defined(LED_FUNC)) && (LED_FUNC == TRUE)
-            GPIOA_InverseBits(LED_PIN);
-#endif
+            if( !is_boot_sync && len ) DeviceLedActivity();
 
             }
         }
@@ -484,9 +493,7 @@ void RF_StatusQuery( void )
         // ·¢ËÍÊý¾Ý
         if( s == 0 )
         {
-#if(defined(LED_FUNC)) && (LED_FUNC == TRUE)
-            GPIOA_InverseBits(LED_PIN);
-#endif
+            DeviceLedActivity();
 
             gRfStatus = RF_STATUS_TX;
             pPkt_t->type = PKT_DATA_FLAG;

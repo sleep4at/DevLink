@@ -16,7 +16,28 @@
 #include "rf_uart_rx.h"
 #include "usb_uart.h"
 
+/* Free-running core-clock counter for non-blocking LED timing. */
+static void AppTimebaseInit( void )
+{
+    SysTick->CTLR = 0;
+    SysTick->CNTL = 0;
+    SysTick->CMP = 0xFFFFFFFFu;
+    SysTick->SR = SysTick_SR_CNTIF;
+    SysTick->CTLR = SysTick_CTLR_STCLK | SysTick_CTLR_STE;
+}
+
 extern volatile uint8_t RF_bound_Flag;
+
+/* Activity changes the selected LED for a short window. The GPIO is updated
+ * in the main loop, never directly from USB or RF interrupt context. */
+static volatile uint8_t s_host_led_phase;
+static volatile uint32_t s_host_led_until;
+
+void HostLedActivity( void )
+{
+    s_host_led_phase ^= 1u;
+    s_host_led_until = SYS_GetSysTickCnt() + GetSysClock() / 20u;
+}
 
 /* PA2 is a local active-low request key in the fixed Host firmware. */
 static volatile uint8_t s_boot_request;
@@ -58,6 +79,7 @@ static void HostLedTask( void )
     static uint32_t last_toggle;
     uint8_t bound = (RF_bound_Flag != 0);
     uint32_t now = SYS_GetSysTickCnt();
+    uint8_t active = ((int32_t)(now - s_host_led_until) < 0);
 
     if( bound != last_bound )
     {
@@ -77,8 +99,9 @@ static void HostLedTask( void )
     }
     else
     {
-        /* Host role is the active-high LED in the user's dual-LED wiring. */
-        GPIOA_SetBits( LED_PIN );
+        /* Host role is active-high; traffic briefly selects the other LED. */
+        if( bound && active && s_host_led_phase ) GPIOA_ResetBits( LED_PIN );
+        else GPIOA_SetBits( LED_PIN );
         GPIOA_ModeCfg( LED_PIN, GPIO_ModeOut_PP_5mA );
     }
 }
@@ -95,6 +118,7 @@ void process_main( void )
     while(1)
     {
         HostLedTask();
+        RF_RxService();
         USB_StatusQuery();
     }
 }
@@ -110,6 +134,7 @@ int main(void)
 {
     HSECFG_Capacitance( HSECap_18p );
     SetSysClock( CLK_SOURCE_HSE_PLL_100MHz );
+    AppTimebaseInit();
     HostIo_Init();
 #ifdef DEBUG
     GPIOA_SetBits( bTXD_4 );

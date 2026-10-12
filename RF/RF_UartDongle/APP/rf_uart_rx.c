@@ -17,7 +17,6 @@
 
 
 uint8_t volatile RF_bound_Flag;
-uint32_t ledcount = 0;
 
 /*********************************************************************
  * GLOBAL TYPEDEFS
@@ -318,6 +317,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
             {
                 typeBufSize payload_len = pPkt->length - PKT_DATA_OFFSET;
                 typeBufSize accepted_len = payload_len;
+                if( payload_len ) HostLedActivity();
                 write_buf( pRfBuf, (pPkt+1), &accepted_len );
                 if( accepted_len != payload_len )
                 {
@@ -461,52 +461,41 @@ __HIGH_CODE
 uint8_t RF_RxQuery( void *buf, typeBufSize *len )
 {
 
-#if(defined(LED_FUNC)) && (LED_FUNC == TRUE)
-    //»ñÈ¡bound±êÖ¾
-    if(RF_bound_Flag)
-    {
-        ledcount++;
-        if(ledcount >=80000)
-        {
-            GPIOA_SetBits(LED_PIN);  
-            ledcount = 0;
-        }
-    }
-    else
-    {
-        GPIOA_ResetBits(LED_PIN);
-    }
-#endif
-
     uint8_t *p;
 
     if( gRxDataStatus == DATA_STATUS_RCV )
     {
         if( read_buf( pRfBuf, buf, len ) == 0 )
         {
-#if(defined(LED_FUNC)) && (LED_FUNC == TRUE)
-            GPIOA_InverseBits(LED_PIN);
-#endif
+            HostLedActivity();
             PFIC_DisableIRQ(BLEL_IRQn);
             gRxDataStatus = DATA_STATUS_START;
             PFIC_EnableIRQ(BLEL_IRQn);
         }
     }
-    else if( gRxDataStatus == DATA_STATUS_TIMEOUT )
-    {
-        *len = 0;
-        rf_disconnect( );
-    }
     else
     {
         *len = 0;
-        if( gRfStatus == RF_STATUS_WAIT )
-        {
-            gRfStatus = RF_STATUS_RX;
-            rf_rx_start( gIntervalTimer );
-        }
+        RF_RxService( );
     }
     return *len;
+}
+
+/* Keep the radio receive state machine running independently of USB mode.
+ * CDC mode does not call RF_RxQuery() through the vendor bulk-IN path, but
+ * pairing and RF timeouts still need to be serviced. */
+__HIGH_CODE
+void RF_RxService( void )
+{
+    if( gRxDataStatus == DATA_STATUS_TIMEOUT )
+    {
+        rf_disconnect( );
+    }
+    else if( gRxDataStatus != DATA_STATUS_RCV && gRfStatus == RF_STATUS_WAIT )
+    {
+        gRfStatus = RF_STATUS_RX;
+        rf_rx_start( gIntervalTimer );
+    }
 }
 
 /*******************************************************************************

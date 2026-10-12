@@ -44,6 +44,8 @@ extern LINE_CODE Uart0Para;
 void USB_Init( void );
 void USB_StatusQuery( void );
 uint8_t USB_RxQuery( void *buf, typeBufSize *len );
+/* RF/USB data path event; GPIO updates are deferred to the main loop. */
+void HostLedActivity( void );
 
 #ifdef __cplusplus
 }

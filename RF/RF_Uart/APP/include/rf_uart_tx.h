@@ -35,6 +35,7 @@ extern struct simple_buf *pRfBuf;
 void RF_UartTxInit( void );
 void RF_StatusQuery( void );
 void Device_BootPulseTask( void );
+void DeviceLedActivity( void );
 extern volatile uint32_t gRfResendCount;
 extern volatile uint32_t gRfResendFailCount;
 extern volatile uint32_t gRfUartDirectCount;

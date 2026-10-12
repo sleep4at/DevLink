@@ -18,11 +18,16 @@
 
 #define THIS_ENDP0_SIZE         64
 #define MAX_PACKET_SIZE         64
+#define USB_EP0_EVENT_DATA_SIZE 8
 
 #define USB_CDC_MODE      0
 #define USB_VENDOR_MODE   1
 
-/* USB¹¤×÷Ä£Ê½ */
+/* USB work mode.
+ * The default is the CH341-compatible vendor protocol (1a86:7523).
+ * Linux binds it to the in-tree ch341 driver and exposes /dev/ttyUSB*.
+ * CDC (1a86:8040) remains available only for explicit experiments.
+ */
 #define  USB_WORK_MODE     USB_VENDOR_MODE
 
 
@@ -150,7 +155,7 @@ uint8_t SetupReqCode, SetupLen;
 __aligned(4) uint8_t  Ep0Buffer[MAX_PACKET_SIZE];     //¶Ëµã0 ÊÕ·¢¹²ÓÃ  ¶Ëµã4 OUT & IN
 
 //¶Ëµã4µÄÉÏ´«µØÖ·
-__aligned(4) uint8_t  Ep1Buffer[MAX_PACKET_SIZE];     //IN
+__aligned(4) uint8_t  Ep1Buffer[2*MAX_PACKET_SIZE];   //EP1 OUT(64B) + IN(64B)
 __aligned(4) uint8_t  Ep2Buffer[2*MAX_PACKET_SIZE];   //OUT & IN
 __aligned(4) uint8_t  Ep3Buffer[2*MAX_PACKET_SIZE];   //OUT & IN
 
@@ -225,7 +230,7 @@ __aligned(4) uint8_t Ep1OUTDataBuf[MAX_PACKET_SIZE];
 uint32_t gEnd2DataLen;
 
 /* ±£´æUSBÖÐ¶ÏµÄ×´Ì¬ ->¸Ä³É¼¸×éµÄ²Ù×÷·½Ê½ */
-#define USB_IRQ_FLAG_NUM     4
+#define USB_IRQ_FLAG_NUM     16
 
 uint8_t usb_irq_w_idx = 0;
 uint8_t usb_irq_r_idx = 0;
@@ -233,6 +238,9 @@ uint8_t usb_irq_r_idx = 0;
 volatile uint8_t usb_irq_len[USB_IRQ_FLAG_NUM];
 volatile uint8_t usb_irq_pid[USB_IRQ_FLAG_NUM];
 volatile uint8_t usb_irq_flag[USB_IRQ_FLAG_NUM];
+/* EP0 is also the DMA buffer. Keep a per-event snapshot so queued
+ * SETUP/control-OUT data cannot be overwritten by the next request. */
+uint8_t usb_irq_ep0_snapshot[USB_IRQ_FLAG_NUM][USB_EP0_EVENT_DATA_SIZE];
 
 uint8_t cdc_uart_sta_trans_step = 0;
 uint8_t ven_ep1_trans_step = 0;
@@ -568,6 +576,9 @@ void USB_IRQHandler(void)
           R8_UEP1_CTRL = (R8_UEP1_CTRL & 0xfc) | IN_NAK; //IN_NAK
         }break;
         case UIS_TOKEN_OUT | 0:{    // endpoint 0
+          uint8_t copy_len = usb_irq_len[usb_irq_w_idx];
+          if( copy_len > USB_EP0_EVENT_DATA_SIZE ) copy_len = USB_EP0_EVENT_DATA_SIZE;
+          memcpy( usb_irq_ep0_snapshot[usb_irq_w_idx], Ep0Buffer, copy_len );
           if( R8_USB_INT_FG & RB_U_TOG_OK )   //²»Í¬²½µÄÊý¾Ý°ü½«¶ªÆú
             R8_UEP0_CTRL = (R8_UEP0_CTRL & 0xf3) | 0x08; //OUT_NAK
           else usb_irq_flag[usb_irq_w_idx] = 0;
@@ -589,11 +600,17 @@ void USB_IRQHandler(void)
     /* setup°ü´¦Àí */
     if(R8_USB_INT_ST & RB_UIS_SETUP_ACT)
     {
+      /* A new SETUP token always terminates the previous control transfer.
+       * Clear a prior STALL and restart EP0 DATA toggles before queuing the
+       * request; otherwise a deliberately STALLed request (e.g. string 0xEE)
+       * can poison all subsequent control transfers. */
+      R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_NAK | UEP_T_RES_NAK;
       /* ÓëÖ®Ç°µÄ´¦Àí½Ó¹ì -- UIS_TOKEN_SETUP */
       /* Ö±½ÓÐ´Èë */
       usb_irq_flag[usb_irq_w_idx] = 1;
       usb_irq_pid[usb_irq_w_idx]  = UIS_TOKEN_SETUP | 0;  //±£ÁôÖ®Ç°µÄ±êÖ¾
       usb_irq_len[usb_irq_w_idx]  = 8;
+      memcpy( usb_irq_ep0_snapshot[usb_irq_w_idx], Ep0Buffer, USB_EP0_EVENT_DATA_SIZE );
       /* ÇÐµ½ÏÂÒ»¸öÐ´µØÖ· */
       usb_irq_w_idx++;
       if(usb_irq_w_idx >= USB_IRQ_FLAG_NUM) usb_irq_w_idx = 0;
@@ -669,6 +686,11 @@ void USB_IRQProcessHandler( void )   /* USBÖÐ¶Ï·þÎñ³ÌÐò */
         i = usb_irq_r_idx;
       usb_irq_r_idx++;
       if(usb_irq_r_idx >= USB_IRQ_FLAG_NUM) usb_irq_r_idx = 0;
+      if( ((usb_irq_pid[i] & 0x3f) == (UIS_TOKEN_SETUP | 0)) ||
+          ((usb_irq_pid[i] & 0x3f) == (UIS_TOKEN_OUT | 0)) )
+      {
+        memcpy( Ep0Buffer, usb_irq_ep0_snapshot[i], USB_EP0_EVENT_DATA_SIZE );
+      }
       switch ( usb_irq_pid[i] & 0x3f )   // ·ÖÎö²Ù×÷ÁîÅÆºÍ¶ËµãºÅ
       {
         case UIS_TOKEN_IN | 4:  //endpoint 4# ÅúÁ¿¶ËµãÉÏ´«Íê³É
@@ -690,6 +712,29 @@ void USB_IRQProcessHandler( void )   /* USBÖÐ¶Ï·þÎñ³ÌÐò */
         }
         case UIS_TOKEN_OUT | 1:    // endpoint 1# ÅúÁ¿¶ËµãÏÂ´«Íê³É
         {
+#if ( USB_WORK_MODE== USB_CDC_MODE )
+          typeBufSize data_len = usb_irq_len[i];
+          typeBufSize packet_len = data_len;
+          write_buf( pUsbBuf, Ep1OUTDataBuf, &data_len );
+          if( packet_len && data_len == packet_len )
+          {
+            Ep1DataOUTFlag = 0;
+            PFIC_DisableIRQ(USB_IRQn);
+            R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
+            PFIC_EnableIRQ(USB_IRQn);
+          }
+          else
+          {
+            Ep1DataOUTLen = packet_len;
+            Ep1DataOUTFlag = packet_len != 0;
+            if( !packet_len )
+            {
+              PFIC_DisableIRQ(USB_IRQn);
+              R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
+              PFIC_EnableIRQ(USB_IRQn);
+            }
+          }
+#else
           PRINT("usb_out1\n");
           len = usb_irq_len[i];
           //Ep1OUTDataBuf
@@ -704,6 +749,7 @@ void USB_IRQProcessHandler( void )   /* USBÖÐ¶Ï·þÎñ³ÌÐò */
           PFIC_DisableIRQ(USB_IRQn);
           R8_UEP1_CTRL = R8_UEP1_CTRL & 0xf3; //OUT_ACK
           PFIC_EnableIRQ(USB_IRQn);
+#endif
           break;
         }
         case UIS_TOKEN_IN | 1:   // endpoint 1# ÖÐ¶Ï¶ËµãÉÏ´«Íê³É
@@ -1220,6 +1266,12 @@ void USB_IRQProcessHandler( void )   /* USBÖÐ¶Ï·þÎñ³ÌÐò */
                       len = 0xFF;                                  // ²»Ö§³ÖµÄÃèÊö·ûÀàÐÍ
                       break;
                   }
+                  /* Unsupported descriptor requests must be STALLed;
+                   * never reuse the previous pDescr contents. */
+                  if( len == 0xFF )
+                  {
+                    break;
+                  }
                   if ( SetupLen > len ) SetupLen = len;            // ÏÞÖÆ×Ü³¤¶È
                   len = (SetupLen >= THIS_ENDP0_SIZE) ? THIS_ENDP0_SIZE : SetupLen;  // ±¾´Î´«Êä³¤¶È
                   memcpy( Ep0Buffer, pDescr, len );                 /* ¼ÓÔØÉÏ´«Êý¾Ý */
@@ -1404,6 +1456,7 @@ void USB_IRQProcessHandler( void )   /* USBÖÐ¶Ï·þÎñ³ÌÐò */
           if ( len == 0xFF )  // ²Ù×÷Ê§°Ü
           {
             SetupReqCode = 0xFF;
+            R8_UEP0_T_LEN = 0;
             PFIC_DisableIRQ(USB_IRQn);
             R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_STALL | UEP_T_RES_STALL;  // STALL
             PFIC_EnableIRQ(USB_IRQn);
@@ -1879,14 +1932,47 @@ void USB_StatusQuery( void )
     typeBufSize len;
     uint8_t i;
 
-    i = usb_irq_r_idx;
-    if(usb_irq_flag[i])
+    /* Drain the pending USB event queue in one pass.  Processing only one
+     * entry per main-loop iteration allowed a descriptor burst from the
+     * Linux ch341 driver to fill the ring and lose a SETUP request. */
+    for( i = 0; i < USB_IRQ_FLAG_NUM; ++i )
     {
+        uint8_t event_idx = usb_irq_r_idx;
+        if( !usb_irq_flag[event_idx] ) break;
         USB_IRQProcessHandler( );
-        usb_irq_flag[i] = 0;
+        usb_irq_flag[event_idx] = 0;
     }
     if( devinf.UsbAddress )
     {
+#if ( USB_WORK_MODE== USB_CDC_MODE )
+        /* CDC ACM bulk-IN is endpoint 1; forward target UART data from RF. */
+        if( (R8_UEP1_CTRL & MASK_UEP_T_RES) == UEP_T_RES_NAK )
+        {
+            len = MAX_PACKET_SIZE;
+            if( RF_RxQuery( &Ep1Buffer[MAX_PACKET_SIZE], &len ) && len <= MAX_PACKET_SIZE )
+            {
+                R8_UEP1_T_LEN = (uint8_t)len;
+                PFIC_DisableIRQ(USB_IRQn);
+                R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
+                PFIC_EnableIRQ(USB_IRQn);
+            }
+        }
+
+        /* Retry the retained packet only after RF has freed queue space. */
+        if( Ep1DataOUTFlag )
+        {
+            typeBufSize retry_len = Ep1DataOUTLen;
+            typeBufSize packet_len = retry_len;
+            write_buf( pUsbBuf, Ep1OUTDataBuf, &retry_len );
+            if( retry_len == packet_len )
+            {
+                Ep1DataOUTFlag = 0;
+                PFIC_DisableIRQ(USB_IRQn);
+                R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
+                PFIC_EnableIRQ(USB_IRQn);
+            }
+        }
+#else
 #if ( USB_WORK_MODE== USB_VENDOR_MODE)
         if( (R8_UEP2_CTRL&MASK_UEP_T_RES) == UEP_T_RES_NAK )
         {
@@ -1903,6 +1989,7 @@ void USB_StatusQuery( void )
                 PFIC_EnableIRQ(USB_IRQn);
             }
         }
+#endif
 #endif
     }
  }
@@ -1937,12 +2024,14 @@ uint8_t USB_RxQuery( void *buf, typeBufSize *len )
             return 0x80;
         }
     }
+#if ( USB_WORK_MODE== USB_CDC_MODE )
+    if( pUsbBuf && pUsbBuf->data_len )
+#else
     if( gEnd2DataLen )
+#endif
     {
 
-#if(defined(LED_FUNC)) && (LED_FUNC == TRUE)
-        GPIOA_InverseBits(LED_PIN);
-#endif
+        HostLedActivity();
         
         typeBufSize data_len;
         typeBufSize max_len = *len;
@@ -1956,13 +2045,18 @@ uint8_t USB_RxQuery( void *buf, typeBufSize *len )
             return 0xFF;
         }
         *len = max_len;
-        gEnd2DataLen = read_buf( pUsbBuf,buf,len  );
+        typeBufSize remain_len = read_buf( pUsbBuf,buf,len  );
+#if ( USB_WORK_MODE== USB_VENDOR_MODE )
+        gEnd2DataLen = remain_len;
         if( gEnd2DataLen < (USB_BUF_LEN-MAX_PACKET_SIZE) )
         {
             PFIC_DisableIRQ(USB_IRQn);
             R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES)|UEP_R_RES_ACK; //OUT_ACK
             PFIC_EnableIRQ(USB_IRQn);
         }
+#else
+        (void)remain_len;
+#endif
         return 0x0;
     }
     *len = 0;
