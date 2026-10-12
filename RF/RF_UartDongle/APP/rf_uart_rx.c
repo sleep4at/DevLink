@@ -3,14 +3,14 @@
  * Author             : WCH
  * Version            : V1.0
  * Date               : 2024/08/15
- * Description        : ÎÞÏß´®¿Ú-½ÓÊÕ¶Ë
+ * Description        : 无线串口-接收端
  *
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * SPDX-License-Identifier: Apache-2.0
  *******************************************************************************/
 
 /******************************************************************************/
-/* Í·ÎÄ¼þ°üº¬ */
+/* 头文件包含 */
 #include "rf.h"
 #include "rf_uart_rx.h"
 #include "usb_uart.h"
@@ -34,7 +34,7 @@ rfTxBuf_t gTxBuf;
 uint32_t gSysClock;
 uint32_t gRfTxCount;
 uint32_t gIntervalTimer;
-uint16_t gServerData; // ÐèÒªµôµç±£´æ£¬Ðè±£´æÖÁflash
+uint16_t gServerData; // 需要掉电保存，需保存至flash
 uint16_t gTimeoutMax;
 uint16_t gTimeout;
 
@@ -81,7 +81,7 @@ static typeBufSize Host_CreditLength( uint8_t credit )
 /*******************************************************************************
  * @fn      rf_rand
  *
- * @brief   Ëæ»úÊýÉú³Éº¯Êý
+ * @brief   随机数生成函数
  *
  * @return  None.
  */
@@ -101,7 +101,7 @@ uint32_t rf_rand16( uint32_t seed )
 /*******************************************************************************
  * @fn      rf_rand
  *
- * @brief   Ëæ»úÊýÉú³Éº¯Êý
+ * @brief   随机数生成函数
  *
  * @return  None.
  */
@@ -117,7 +117,7 @@ uint32_t rf_rand_aa( uint16_t rand )
 /*******************************************************************************
  * @fn      rf_disconnect
  *
- * @brief   ¶Ï¿ªÁ¬½Ó
+ * @brief   断开连接
  *
  * @param   None.
  *
@@ -130,7 +130,7 @@ static void rf_disconnect( void )
     RFRole_Shut( );
     gBoundStatus = BOUND_STATUS_IDLE;
     gRxDataStatus = DATA_STATUS_START;
-    TMR_ITCfg(DISABLE, TMR_IT_CYC_END); // ¹Ø±ÕÖÐ¶Ï
+    TMR_ITCfg(DISABLE, TMR_IT_CYC_END); // 关闭中断
 
     rf_tx_set_sync_word( AA );
     rf_tx_set_frequency( DEF_FREQUENCY );
@@ -143,7 +143,7 @@ static void rf_disconnect( void )
 /*******************************************************************************
  * @fn      rf_bound
  *
- * @brief   ¶Ï¿ªÁ¬½Ó
+ * @brief   断开连接
  *
  * @param   None.
  *
@@ -188,10 +188,10 @@ static void rfProcessRx( rfPackage_t *pPkt )
             {
                 int8_t rssi  = *(uint8_t* )((uint8_t* )pPkt + pPkt->length + 2 +2 );
 
-                // ·ÇµÚÒ»´ÎÁ¬½Ó£¬µØÖ·Æ¥Åä¿ÉÁ¬
+                // 非第一次连接，地址匹配可连
                 if( pReq_t->severData )
                 {
-                    // ÐÅÏ¢Æ¥Åä£¬»òÕßdongleÖØÐÂÉÏµçÁË
+                    // 信息匹配，或者dongle重新上电了
                     if( !gServerData || pReq_t->severData == gServerData )
                     {
                         reg = 1;
@@ -199,7 +199,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
                 }
                 else
                 {
-                    // µÚÒ»´ÎÁ¬½Ó£¬Ðè¿¿½üÁ¬½Ó
+                    // 第一次连接，需靠近连接
                     if( rssi > -35 )
                     {
                         reg = 1;
@@ -210,7 +210,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
                     bound_rsp_t *pRsp_t = (bound_rsp_t *)&gTxBuf.TxBuf[PKT_HEAD_LEN];
 
                     gRfStatus = RF_STATUS_TXRSP;
-                    // Éú³ÉÏÂ´Î»ØÁ¬µÄËæ»úÐÅÏ¢
+                    // 生成下次回连的随机信息
                     gDataSeq = 0;
                     gServerData = rf_rand16( rssi );
                     pPkt_t->type = PKT_CMD_BOUND_RSP;
@@ -256,7 +256,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
                 pPkt_t->type = PKT_CMD_RSP_STATUS;
                 if( gBoundStatus < BOUND_STATUS_EST  )
                 {
-                    // ·¢ËÍ´®¿Ú²¨ÌØÂÊ
+                    // 发送串口波特率
                     pPkt_t->length = PKT_DATA_OFFSET+1+sizeof(Uart0Para);
                     pRsp_t->opcode = OPCODE_BSP;
                     pRsp_t->buad_t.BaudRate = Uart0Para.BaudRate;
@@ -280,7 +280,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
                     }
                     else if( s == 0x80 )
                     {
-                        // ·¢ËÍ´®¿Ú²¨ÌØÂÊ
+                        // 发送串口波特率
                         pPkt_t->length = PKT_DATA_OFFSET+1+sizeof(Uart0Para);
                         pRsp_t->opcode = OPCODE_BSP;
                         pRsp_t->buad_t.BaudRate = Uart0Para.BaudRate;
@@ -360,7 +360,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
             }
             else
             {
-                // ÖØ´«
+                // 重传
             }
             rf_tx_start( pPkt_t, 20 );
             
@@ -381,7 +381,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
         }
         if( gBoundStatus == BOUND_STATUS_WAIT )
         {
-            // Á¬½ÓÈ·ÈÏ£¬Æô¶¯Á¬½ÓÍ¨ÐÅ³¬Ê±
+            // 连接确认，启动连接通信超时
             gBoundStatus = BOUND_STATUS_EST;
             gIntervalTimer = CONN_INTERVAL*1000;
             gTimeoutMax = (CONN_TIMEOUT*10/CONN_INTERVAL);
@@ -500,7 +500,7 @@ void RF_RxService( void )
 /*******************************************************************************
  * @fn      RF_UartTxInit
  *
- * @brief   RF uart·¢ËÍÓ¦ÓÃ³õÊ¼»¯
+ * @brief   RF uart发送应用初始化
  *
  * @param   None.
  *

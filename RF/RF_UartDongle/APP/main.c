@@ -11,7 +11,7 @@
  *******************************************************************************/
 
 /******************************************************************************/
-/* Í·ÎÄ¼þ°üº¬ */
+/* 头文件包含 */
 #include "rf.h"
 #include "rf_uart_rx.h"
 #include "usb_uart.h"
@@ -128,7 +128,7 @@ void process_main( void )
 /*********************************************************************
  * @fn      main
  *
- * @brief   Ö÷º¯Êý
+ * @brief   主函数
  *
  * @return  none
  */
@@ -140,12 +140,12 @@ int main(void)
     HostIo_Init();
 #ifdef DEBUG
     GPIOA_SetBits( bTXD_4 );
-    GPIOA_ModeCfg( bTXD_4, GPIO_ModeOut_PP_5mA ); // TXD-ÅäÖÃÍÆÍìÊä³ö£¬×¢ÒâÏÈÈÃIO¿ÚÊä³ö¸ßµçÆ½
+    GPIOA_ModeCfg( bTXD_4, GPIO_ModeOut_PP_5mA ); // TXD-配置推挽输出，注意先让IO口输出高电平
     UART_Remap( ENABLE, UART_TX_REMAP_PA7, UART_RX_REMAP_PA2 );
     UART_DefInit( );
 #endif
 
-    //ÉèÖÃLED_PIN
+    //设置LED_PIN
 #if(defined(LED_FUNC)) && (LED_FUNC == TRUE)
     GPIOA_ResetBits(LED_PIN);
     GPIOA_ModeCfg(LED_PIN, GPIO_ModeOut_PP_5mA);

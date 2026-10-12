@@ -17,7 +17,7 @@ extern "C"
 #include "CH57x_common.h"
 #include "buf.h"
 
-#define  DEF_FREQUENCY   17              // Í¨ÐÅÆµµã
+#define  DEF_FREQUENCY   17              // 通信频点
 #define  TEST_PHY_MODE   PHY_MODE_PHY_2M
 
 #if(TEST_PHY_MODE == PHY_MODE_2G4 )
@@ -137,18 +137,18 @@ typedef struct
 
 typedef struct  __attribute__((packed))
 {
-    uint16_t interval; // ¹ã²¥ºÍÁ¬½ÓÈ·ÈÏÆÚ¼ä£¬·¢ËÍ¼ä¸ô£¬µ¥Î»£ºms
-    uint16_t severData; // »ØÁ¬ÅäÖÃÎªÉÏ´ÎÁ¬½ÓµÄÐÅÏ¢£¬Ê×´ÎÁ¬½ÓÐ´0
+    uint16_t interval; // 广播和连接确认期间，发送间隔，单位：ms
+    uint16_t severData; // 回连配置为上次连接的信息，首次连接写0
 } bound_req_t;
 
 typedef struct  __attribute__((packed))
 {
-    uint32_t accessaddr;// Á¬½ÓÍ¨ÐÅ£¬½ÓÈëµØÖ·
-    uint8_t channel; // Á¬½ÓÍ¨ÐÅ£¬Í¨ÐÅÆµÂÊ
-    uint8_t phy;     // Á¬½ÓÍ¨ÐÅ£¬PHYÀàÐÍ
-    uint16_t severData; // ÓÃÓÚÊ¶±ð»ØÁ¬µÄÐÅÏ¢
-    uint16_t interval; // Á¬½ÓÍ¨ÐÅ£¬¿ÕÏÐÊ±·¢ËÍ»ñÈ¡×´Ì¬ÃüÁîµÄ¼ä¸ô£¬µ¥Î»£ºms
-    uint16_t timeout;  // Á¬½ÓÍ¨ÐÅ£¬¶Ï¿ªÊ±¼ä£¬µ¥Î»£º10ms
+    uint32_t accessaddr;// 连接通信，接入地址
+    uint8_t channel; // 连接通信，通信频率
+    uint8_t phy;     // 连接通信，PHY类型
+    uint16_t severData; // 用于识别回连的信息
+    uint16_t interval; // 连接通信，空闲时发送获取状态命令的间隔，单位：ms
+    uint16_t timeout;  // 连接通信，断开时间，单位：10ms
 } bound_rsp_t;
 
 
@@ -158,10 +158,10 @@ typedef struct __attribute__((packed))
     union{
 
         struct {
-            uint32_t  BaudRate;   /* ²¨ÌØÂÊ */
-            uint8_t StopBits;   /* Í£Ö¹Î»¼ÆÊý£¬0£º1Í£Ö¹Î»£¬1£º1.5Í£Ö¹Î»£¬2£º2Í£Ö¹Î» */
-            uint8_t ParityType;   /* Ð£ÑéÎ»£¬0£ºNone£¬1£ºOdd£¬2£ºEven£¬3£ºMark£¬4£ºSpace */
-            uint8_t DataBits;   /* Êý¾ÝÎ»¼ÆÊý£º5£¬6£¬7£¬8£¬16 */
+            uint32_t  BaudRate;   /* 波特率 */
+            uint8_t StopBits;   /* 停止位计数，0：1停止位，1：1.5停止位，2：2停止位 */
+            uint8_t ParityType;   /* 校验位，0：None，1：Odd，2：Even，3：Mark，4：Space */
+            uint8_t DataBits;   /* 数据位计数：5，6，7，8，16 */
             uint8_t ioStaus;
         } buad_t;
 

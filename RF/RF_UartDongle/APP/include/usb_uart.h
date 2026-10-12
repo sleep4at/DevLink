@@ -19,7 +19,7 @@ extern "C"
 
 
 /**
- * @brief  LED ¹¦ÄÜÓë¶¨Òå Ä¬ÈÏ¿ªÆô
+ * @brief  LED 功能与定义 默认开启
  * @note   LED status indicator on PA3
  */
 #ifndef LED_FUNC
@@ -30,13 +30,13 @@ extern "C"
 
 
 
-//Line Code½á¹¹
+//Line Code结构
  typedef struct __PACKED _LINE_CODE
 {
-  uint32_t  BaudRate;   /* ²¨ÌØÂÊ */
-  uint8_t StopBits;   /* Í£Ö¹Î»¼ÆÊý£¬0£º1Í£Ö¹Î»£¬1£º1.5Í£Ö¹Î»£¬2£º2Í£Ö¹Î» */
-  uint8_t ParityType;   /* Ð£ÑéÎ»£¬0£ºNone£¬1£ºOdd£¬2£ºEven£¬3£ºMark£¬4£ºSpace */
-  uint8_t DataBits;   /* Êý¾ÝÎ»¼ÆÊý£º5£¬6£¬7£¬8£¬16 */
+  uint32_t  BaudRate;   /* 波特率 */
+  uint8_t StopBits;   /* 停止位计数，0：1停止位，1：1.5停止位，2：2停止位 */
+  uint8_t ParityType;   /* 校验位，0：None，1：Odd，2：Even，3：Mark，4：Space */
+  uint8_t DataBits;   /* 数据位计数：5，6，7，8，16 */
   uint8_t ioStaus;
 }LINE_CODE, *PLINE_CODE;
 extern LINE_CODE Uart0Para;
