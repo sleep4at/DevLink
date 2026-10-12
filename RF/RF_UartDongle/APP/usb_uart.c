@@ -230,7 +230,7 @@ __aligned(4) uint8_t Ep1OUTDataBuf[MAX_PACKET_SIZE];
 uint32_t gEnd2DataLen;
 
 /* ±£´æUSBÖÐ¶ÏµÄ×´Ì¬ ->¸Ä³É¼¸×éµÄ²Ù×÷·½Ê½ */
-#define USB_IRQ_FLAG_NUM     16
+#define USB_IRQ_FLAG_NUM     32
 
 uint8_t usb_irq_w_idx = 0;
 uint8_t usb_irq_r_idx = 0;
@@ -244,6 +244,10 @@ uint8_t usb_irq_ep0_snapshot[USB_IRQ_FLAG_NUM][USB_EP0_EVENT_DATA_SIZE];
 
 uint8_t cdc_uart_sta_trans_step = 0;
 uint8_t ven_ep1_trans_step = 0;
+
+/* EP0 SETUP packets must be answered promptly. Bulk/RF work remains queued,
+ * but control requests are dispatched synchronously from USB IRQ context. */
+void USB_IRQProcessHandler( void );
 
 /* ¶Ëµã0Ã¶¾ÙÉÏ´«Ö¡´¦Àí */
 uint8_t ep0_send_buf[256];
@@ -611,9 +615,18 @@ void USB_IRQHandler(void)
       usb_irq_pid[usb_irq_w_idx]  = UIS_TOKEN_SETUP | 0;  //±£ÁôÖ®Ç°µÄ±êÖ¾
       usb_irq_len[usb_irq_w_idx]  = 8;
       memcpy( usb_irq_ep0_snapshot[usb_irq_w_idx], Ep0Buffer, USB_EP0_EVENT_DATA_SIZE );
-      /* ÇÐµ½ÏÂÒ»¸öÐ´µØÖ· */
-      usb_irq_w_idx++;
-      if(usb_irq_w_idx >= USB_IRQ_FLAG_NUM) usb_irq_w_idx = 0;
+      /* Dispatch this control request now. Deferring EP0 SETUP handling to
+       * the foreground loop can exceed the host's control-transfer timeout
+       * while RF/USB events are arriving. */
+      {
+        uint8_t setup_idx = usb_irq_w_idx;
+        usb_irq_w_idx++;
+        if(usb_irq_w_idx >= USB_IRQ_FLAG_NUM) usb_irq_w_idx = 0;
+        usb_irq_r_idx = setup_idx;
+        USB_IRQProcessHandler();
+        usb_irq_flag[setup_idx] = 0;
+        usb_irq_r_idx = usb_irq_w_idx;
+      }
 
       R8_USB_INT_FG = RB_UIF_TRANSFER;
     }

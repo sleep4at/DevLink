@@ -35,6 +35,7 @@ static volatile uint32_t s_host_led_until;
 
 void HostLedActivity( void )
 {
+    /* Alternate the selected LED for every accepted transaction. */
     s_host_led_phase ^= 1u;
     s_host_led_until = SYS_GetSysTickCnt() + GetSysClock() / 20u;
 }
@@ -104,6 +105,7 @@ static void HostLedTask( void )
         else GPIOA_SetBits( LED_PIN );
         GPIOA_ModeCfg( LED_PIN, GPIO_ModeOut_PP_5mA );
     }
+    if( !active ) s_host_led_phase = 0;
 }
 
 

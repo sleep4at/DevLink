@@ -467,7 +467,6 @@ uint8_t RF_RxQuery( void *buf, typeBufSize *len )
     {
         if( read_buf( pRfBuf, buf, len ) == 0 )
         {
-            HostLedActivity();
             PFIC_DisableIRQ(BLEL_IRQn);
             gRxDataStatus = DATA_STATUS_START;
             PFIC_EnableIRQ(BLEL_IRQn);
