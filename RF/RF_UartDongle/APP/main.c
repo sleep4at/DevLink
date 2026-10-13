@@ -40,8 +40,14 @@ void HostLedActivity( void )
     s_host_led_until = SYS_GetSysTickCnt() + GetSysClock() / 20u;
 }
 
-/* PA2 is a local active-low request key in the fixed Host firmware. */
+/* PA2 is the remote-download request key; PA7 enters this CH570's ROM
+ * Bootloader.  Both keys are active-low and are handled from the main loop. */
 static volatile uint8_t s_boot_request;
+static volatile uint8_t s_self_boot_request;
+static volatile uint32_t s_self_boot_edge_tick;
+
+#define HOST_SELFBOOT_DEBOUNCE_MS   25u
+#define HOST_SELFBOOT_HOLD_MS       3000u
 
 __INTERRUPT __HIGH_CODE
 void GPIOA_IRQHandler( void )
@@ -50,6 +56,17 @@ void GPIOA_IRQHandler( void )
     {
         GPIOA_ClearITFlagBit( GPIO_Pin_2 );
         s_boot_request = 1;
+    }
+    if( GPIOA_ReadITFlagBit( GPIO_Pin_7 ) )
+    {
+        GPIOA_ClearITFlagBit( GPIO_Pin_7 );
+        /* Ignore bounce/retrigger edges while a press is already being
+         * debounced or is waiting for the release confirmation. */
+        if( s_self_boot_request == 0 )
+        {
+            s_self_boot_request = 1;
+            s_self_boot_edge_tick = SYS_GetSysTickCnt();
+        }
     }
 }
 
@@ -64,13 +81,123 @@ uint8_t Host_BootRequestTake( void )
 static void HostIo_Init( void )
 {
     s_boot_request = 0;
+    s_self_boot_request = 0;
+    s_self_boot_edge_tick = 0;
     GPIOA_ModeCfg( GPIO_Pin_2, GPIO_ModeIN_PU );
     GPIOA_ITModeCfg( GPIO_Pin_2, GPIO_ITMode_FallEdge );
-    GPIOA_ClearITFlagBit( GPIO_Pin_2 );
-    /* PA7 is not used as a role key in a fixed Host image. */
-    GPIOA_ModeCfg( GPIO_Pin_7, GPIO_ModeIN_Floating );
+    GPIOA_ModeCfg( GPIO_Pin_7, GPIO_ModeIN_PU );
+    GPIOA_ITModeCfg( GPIO_Pin_7, GPIO_ITMode_FallEdge );
+    GPIOA_ClearITFlagBit( GPIO_Pin_2 | GPIO_Pin_7 );
     GPIOA_ModeCfg( LED_PIN, GPIO_ModeIN_Floating );
     PFIC_EnableIRQ( GPIO_A_IRQn );
+}
+
+/* Erase the small reset stub at Flash address 0, then reset.  With the reset
+ * stub gone, CH570 ROM ISP takes ownership for its normal timeout window.
+ * The routine is copied to RAM so it can continue executing after erasing
+ * the Flash block that contains the application's reset entry. */
+__HIGH_CODE __attribute__((noinline))
+static void Host_EnterRomBootloader( void )
+{
+    uint32_t irq_status;
+
+    if( !(R8_GLOB_CFG_INFO & RB_CFG_BOOT_EN) )
+    {
+        return;
+    }
+
+    SYS_DisableAllIrq( &irq_status );
+    __risc_v_disable_irq();
+
+    /* Release the key before erasing and leave it passive for ROM startup. */
+    GPIOA_ModeCfg( GPIO_Pin_7, GPIO_ModeIN_PU );
+
+    /* Erase exactly one 4-KiB Flash block.  This is the block containing
+     * boot_stub.S; the application is linked at 0x2000 and is not erased. */
+    while( FLASH_ROM_ERASE( 0, FLASH_BLOCK_SIZE ) )
+    {
+        /* Retry transient FlashROM failures, as in the reference sequence. */
+    }
+
+    FLASH_ROM_SW_RESET();
+
+    /* WCH reference ROM-ISP hand-off sequence. */
+    R8_SAFE_ACCESS_SIG = SAFE_ACCESS_SIG1;
+    R8_SAFE_ACCESS_SIG = SAFE_ACCESS_SIG2;
+    SAFEOPERATE;
+    R16_INT_LSI_TUNE = 0xFFFF;
+    R8_RST_WDOG_CTRL |= RB_SOFTWARE_RESET;
+    R8_SAFE_ACCESS_SIG = 0;
+
+    while( 1 )
+    {
+    }
+}
+
+/* PA7 must be held for 3 seconds, then released to confirm ISP entry. The
+ * GPIO IRQ only timestamps the press; timing and hand-off run in main. */
+static void Host_SelfBootTask( void )
+{
+    uint32_t now;
+    uint32_t debounce_ticks;
+    uint32_t hold_ticks;
+
+    if( !s_self_boot_request )
+    {
+        return;
+    }
+
+    if( s_self_boot_request == 1 )
+    {
+        now = SYS_GetSysTickCnt();
+        debounce_ticks = (GetSysClock() / 1000u) * HOST_SELFBOOT_DEBOUNCE_MS;
+        if( (uint32_t)(now - s_self_boot_edge_tick) < debounce_ticks )
+        {
+            return;
+        }
+        if( GPIOA_ReadPortPin( GPIO_Pin_7 ) )
+        {
+            s_self_boot_request = 0;
+            return;
+        }
+        s_self_boot_request = 2;
+        return;
+    }
+
+    now = SYS_GetSysTickCnt();
+    hold_ticks = (GetSysClock() / 1000u) * HOST_SELFBOOT_HOLD_MS;
+
+    if( s_self_boot_request == 2 )
+    {
+        if( !GPIOA_ReadPortPin( GPIO_Pin_7 ) )
+        {
+            if( (uint32_t)(now - s_self_boot_edge_tick) < hold_ticks )
+            {
+                return;
+            }
+            /* State 3: fast LED blink asks the user to release to confirm. */
+            s_self_boot_request = 3;
+            return;
+        }
+
+        /* Short press cancels. */
+        if( (uint32_t)(now - s_self_boot_edge_tick) < hold_ticks )
+        {
+            s_self_boot_request = 0;
+            return;
+        }
+    }
+    else if( s_self_boot_request == 3 && !GPIOA_ReadPortPin( GPIO_Pin_7 ) )
+    {
+        return;
+    }
+
+    s_self_boot_request = 0;
+
+    /* Detach the application USB device before handing control to ROM ISP. */
+    USB_DeviceDisable();
+    mDelaymS( 20 );
+    Host_EnterRomBootloader();
 }
 
 static void HostLedTask( void )
@@ -81,6 +208,21 @@ static void HostLedTask( void )
     uint8_t bound = (RF_bound_Flag != 0);
     uint32_t now = SYS_GetSysTickCnt();
     uint8_t active = ((int32_t)(now - s_host_led_until) < 0);
+
+    if( s_self_boot_request == 3 )
+    {
+        if( ((((uint32_t)(now - s_self_boot_edge_tick)) /
+               (GetSysClock() / 5u)) & 1u) != 0u )
+        {
+            GPIOA_SetBits( LED_PIN );
+        }
+        else
+        {
+            GPIOA_ResetBits( LED_PIN );
+        }
+        GPIOA_ModeCfg( LED_PIN, GPIO_ModeOut_PP_5mA );
+        return;
+    }
 
     if( bound != last_bound )
     {
@@ -119,6 +261,7 @@ void process_main( void )
 {
     while(1)
     {
+        Host_SelfBootTask();
         HostLedTask();
         RF_RxService();
         USB_StatusQuery();

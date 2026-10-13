@@ -59,8 +59,29 @@ struct simple_buf *pRfBuf = NULL;
 uint8_t volatile RF_bound_Flag;
 static volatile uint8_t gBootPulsePending;
 static volatile uint8_t gBootPulseSendSync;
+static volatile uint8_t gSelfBootPending;
+static volatile uint32_t gSelfBootEdgeTick;
 static volatile uint8_t gDeviceLedPhase;
 static volatile uint32_t gDeviceLedUntil;
+
+#define DEVICE_SELFBOOT_DEBOUNCE_MS   25u
+#define DEVICE_SELFBOOT_HOLD_MS       3000u
+
+/* PA7 is both the target BOOT connection and a local active-low key.  The
+ * interrupt only records the edge; ROM entry is performed from the main loop
+ * after debounce so no flash/reset work runs in GPIO interrupt context. */
+#if((defined(DTR_RTS_FUNC)) && (DTR_RTS_FUNC == FALSE))
+__INTERRUPT __HIGH_CODE
+void GPIOA_IRQHandler( void )
+{
+    if( GPIOA_ReadITFlagBit( BOOT_PIN ) )
+    {
+        GPIOA_ClearITFlagBit( BOOT_PIN );
+        gSelfBootPending = 1;
+        gSelfBootEdgeTick = SYS_GetSysTickCnt();
+    }
+}
+#endif
 
 void DeviceLedActivity( void )
 {
@@ -96,6 +117,9 @@ void Device_BootPulseTask( void )
     gBootPulsePending = 0;
     gBootPulseSendSync = 0;
 
+    /* PA7 is also the local key.  Keep its edge interrupt out of the target
+     * BOOT/RESET output sequence, then restore it before returning idle. */
+    PFIC_DisableIRQ( GPIO_A_IRQn );
     GPIOA_SetBits( BOOT_PIN | RESET_PIN );
     GPIOA_ModeCfg( BOOT_PIN | RESET_PIN, GPIO_ModeOut_PP_5mA );
     mDelaymS(1);
@@ -109,6 +133,11 @@ void Device_BootPulseTask( void )
     /* Idle Device mode must not drive the target reset/boot lines. */
     GPIOA_ModeCfg( RESET_PIN, GPIO_ModeIN_Floating );
     GPIOA_ModeCfg( BOOT_PIN, GPIO_ModeIN_PU );
+#if((defined(DTR_RTS_FUNC)) && (DTR_RTS_FUNC == FALSE))
+    GPIOA_ITModeCfg( BOOT_PIN, GPIO_ITMode_FallEdge );
+    GPIOA_ClearITFlagBit( BOOT_PIN );
+    PFIC_EnableIRQ( GPIO_A_IRQn );
+#endif
 
     /* Preserve the ISP sync byte ordering used by the original implementation. */
     if( send_sync )
@@ -116,6 +145,122 @@ void Device_BootPulseTask( void )
         uint8_t sync = 0x7F;
         UART_Send( (char *)&sync, 1 );
     }
+}
+
+/* Erase the application reset/startup block, then reset so the chip ROM ISP
+ * takes over.  This intentionally destroys the current image's 0x0000 entry
+ * and is therefore only called after the PA7 long-hold/release confirmation.
+ * Keep this routine in RAM: it must continue executing after erasing address 0. */
+__HIGH_CODE __attribute__((noinline))
+static void Device_EnterRomBootloader( void )
+{
+    uint32_t irq_status;
+
+    /* A disabled boot-loader option cannot be entered by software. */
+    if( !(R8_GLOB_CFG_INFO & RB_CFG_BOOT_EN) )
+    {
+        return;
+    }
+
+    SYS_DisableAllIrq( &irq_status );
+    /* No interrupt may return into Flash after the startup block is erased. */
+    __risc_v_disable_irq();
+
+    /* Leave the target-MCU control lines passive while erasing and resetting. */
+    GPIOA_ModeCfg( RESET_PIN, GPIO_ModeIN_Floating );
+    GPIOA_ModeCfg( BOOT_PIN, GPIO_ModeIN_PU );
+
+    /* This project links _start at 0x0000 (unlike the reference project's
+     * reserved jump-stub layout).  Erasing the first 4 KiB invalidates that
+     * entry; the full project HEX restores it during subsequent programming. */
+    while( FLASH_ROM_ERASE( 0, FLASH_BLOCK_SIZE ) )
+    {
+        /* Retry transient FlashROM failures, as in the reference firmware. */
+    }
+
+    FLASH_ROM_SW_RESET();
+
+    /* Follow the WCH/reference sequence after erasing the reset entry. */
+    R8_SAFE_ACCESS_SIG = SAFE_ACCESS_SIG1;
+    R8_SAFE_ACCESS_SIG = SAFE_ACCESS_SIG2;
+    SAFEOPERATE;
+    R16_INT_LSI_TUNE = 0xFFFF;
+    R8_RST_WDOG_CTRL |= RB_SOFTWARE_RESET;
+    R8_SAFE_ACCESS_SIG = 0;
+
+    /* The reset above should not return. */
+    while( 1 )
+    {
+    }
+}
+
+/* PA7 must be held for 3 seconds, then released to confirm destructive ISP
+ * entry.  The IRQ only records the falling edge; debounce, hold timing, and
+ * Flash operations all run from the main loop. */
+void Device_SelfBootTask( void )
+{
+#if((defined(DTR_RTS_FUNC)) && (DTR_RTS_FUNC == FALSE))
+    uint32_t now;
+    uint32_t debounce_ticks;
+    uint32_t hold_ticks;
+
+    if( !gSelfBootPending )
+    {
+        return;
+    }
+
+    if( gSelfBootPending == 1 )
+    {
+        now = SYS_GetSysTickCnt();
+        debounce_ticks = (GetSysClock() / 1000u) * DEVICE_SELFBOOT_DEBOUNCE_MS;
+        if( (uint32_t)(now - gSelfBootEdgeTick) < debounce_ticks )
+        {
+            return;
+        }
+
+        /* Reject a short/noisy press before starting the long-hold timer. */
+        if( GPIOA_ReadPortPin( BOOT_PIN ) )
+        {
+            gSelfBootPending = 0;
+            return;
+        }
+        gSelfBootPending = 2;
+        return;
+    }
+
+    now = SYS_GetSysTickCnt();
+    hold_ticks = (GetSysClock() / 1000u) * DEVICE_SELFBOOT_HOLD_MS;
+
+    if( gSelfBootPending == 2 )
+    {
+        if( !GPIOA_ReadPortPin( BOOT_PIN ) )
+        {
+            if( (uint32_t)(now - gSelfBootEdgeTick) < hold_ticks )
+            {
+                return;
+            }
+            /* State 3 is shown as a fast PA3 LED blink; release confirms. */
+            gSelfBootPending = 3;
+            return;
+        }
+
+        /* Release before the hold threshold cancels.  If the main loop did
+         * not sample the armed state before release, still require the full
+         * interval before accepting the release as confirmation. */
+        if( (uint32_t)(now - gSelfBootEdgeTick) < hold_ticks )
+        {
+            gSelfBootPending = 0;
+            return;
+        }
+    }
+    else if( gSelfBootPending == 3 && !GPIOA_ReadPortPin( BOOT_PIN ) )
+    {
+        return;
+    }
+
+    gSelfBootPending = 0;
+    Device_EnterRomBootloader();
+#endif
 }
 
 static void Device_LedTask( void )
@@ -126,6 +271,22 @@ static void Device_LedTask( void )
     uint8_t bound = (RF_bound_Flag != 0);
     uint32_t now = SYS_GetSysTickCnt();
     uint8_t active = ((int32_t)(now - gDeviceLedUntil) < 0);
+
+    if( gSelfBootPending == 3 )
+    {
+        /* Blink quickly to indicate that releasing PA7 will erase Flash. */
+        if( ((((uint32_t)(now - gSelfBootEdgeTick)) /
+               (GetSysClock() / 5u)) & 1u) != 0u )
+        {
+            GPIOA_SetBits( LED_PIN );
+        }
+        else
+        {
+            GPIOA_ResetBits( LED_PIN );
+        }
+        GPIOA_ModeCfg( LED_PIN, GPIO_ModeOut_PP_5mA );
+        return;
+    }
 
     if( bound != last_bound )
     {
@@ -482,6 +643,7 @@ void RF_StatusQuery( void )
 {
     uint8_t s;
 
+    Device_SelfBootTask();
     Device_BootPulseTask();
     Device_LedTask();
     if( gTxBuf.status == STA_IDLE )
@@ -579,16 +741,22 @@ void RF_StatusQuery( void )
  *
  * @return  None.
  */
-__HIGH_CODE
 void RF_UartTxInit( void )
 {
     rfBoundInfo_t *pInfo;
     PRINT("----------------- rf uart tx mode -----------------\n");
     gBootPulsePending = 0;
     gBootPulseSendSync = 0;
+    gSelfBootPending = 0;
+    gSelfBootEdgeTick = 0;
     /* BOOT/RESET are high impedance until a validated 0x7F command arrives. */
     GPIOA_ModeCfg( RESET_PIN, GPIO_ModeIN_Floating );
     GPIOA_ModeCfg( BOOT_PIN, GPIO_ModeIN_PU );
+#if((defined(DTR_RTS_FUNC)) && (DTR_RTS_FUNC == FALSE))
+    GPIOA_ITModeCfg( BOOT_PIN, GPIO_ITMode_FallEdge );
+    GPIOA_ClearITFlagBit( BOOT_PIN );
+    PFIC_EnableIRQ( GPIO_A_IRQn );
+#endif
     GPIOA_ModeCfg( LED_PIN, GPIO_ModeIN_Floating );
     gTxDataSeq = 0;
     gRfRxFlag = 0;

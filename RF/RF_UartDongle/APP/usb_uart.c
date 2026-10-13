@@ -748,12 +748,13 @@ void USB_IRQProcessHandler( void )   /* USB中断服务程序 */
             }
           }
 #else
-          PRINT("usb_out1\n");
+          /* Do not print every bulk packet from USB IRQ context.  At a
+           * 30 ms bidirectional test interval this can occupy the debug
+           * UART longer than the host control-transfer timeout and leave
+           * Linux reporting -110 before self-boot is requested. */
           len = usb_irq_len[i];
           //Ep1OUTDataBuf
-          for(int i = 0;i<len;i++)
-          PRINT("%02x  ",Ep1OUTDataBuf[i]);
-          PRINT("\n");
+          /* Per-byte packet dumping intentionally disabled. */
 
           //CH341的数据下发
           Ep1DataOUTFlag = 1;
@@ -2093,6 +2094,21 @@ void USB_Init( void )
     InitUSBDevice();
     PFIC_EnableIRQ( USB_IRQn );
     usb_buffer_create(&pUsbBuf);
+}
+
+void USB_DeviceDisable( void )
+{
+    /* Stop IRQ/DMA, reset the SIE/FIFO, and remove the D+ pull-up.  The SIE
+     * reset is important for software-to-ROM hand-off: unlike power-on reset,
+     * a software reset can otherwise leave the old device address/toggle state
+     * visible while the ROM ISP answers the first Linux descriptor request. */
+    R8_USB_INT_EN = 0;
+    PFIC_DisableIRQ( USB_IRQn );
+    R8_USB_INT_FG = 0xFF;
+    R8_USB_CTRL = RB_UC_RESET_SIE | RB_UC_CLR_ALL;
+    R8_USB_CTRL = 0;
+    R8_UDEV_CTRL = 0;
+    R16_PIN_ALTERNATE &= (uint16_t)~(RB_PIN_USB_EN | RB_UDP_PU_EN);
 }
 
 

@@ -17,7 +17,7 @@ extern "C"
 #include "CH57x_common.h"
 #include "buf.h"
 
-#define   RF_BUF_LEN   1536  /* single-role Host: 1.5 KiB, leaves stack margin */
+#define   RF_BUF_LEN   1024  /* single-role Host: 1 KiB, preserves stack margin */
 
 
 #define  CONN_INTERVAL     10

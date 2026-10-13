@@ -10,22 +10,20 @@
 			"rtos": "NoneOS",
 			"mcu": "CH32H415REU",
 			"description": "",
+			"tempratureScope": "",
 			"artifactType": "executable",
 			"link": "WCH-Link",
 			"peripheral_version": "1.0",
 			"calibrateSupport": false,
 			"calibrateCommand": "",
 			"UIConfigSupport": false,
+			"UIConfigCommand": "",
 			"externalFlashSupport": false
 		},
 		"linkedFolders": [
 			{
 				"name": "LIB",
 				"location": "../LIB"
-			},
-			{
-				"name": "Ld",
-				"location": "../../SRC/Ld"
 			},
 			{
 				"name": "RVMSIS",

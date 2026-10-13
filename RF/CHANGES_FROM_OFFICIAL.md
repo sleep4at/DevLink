@@ -18,7 +18,7 @@
 
 本机现场检查确认：板上当前运行的旧 CDC 固件枚举为 `1a86:8040`，绑定 `cdc_acm` 并创建 `/dev/ttyACM0`。实际打开该节点时，内核日志出现 USB reset，约 6 秒后 USB disconnect，再重新枚举；因此此前“反复打开才偶尔成功”的现象来自固件 CDC 控制传输不稳定，不是权限或串口助手占用。
 
-当前默认构建已切回官方原有 CH341 兼容 Vendor 模式：设备描述符为 `1a86:7523`，数据端点使用 CH341 的 32 字节 bulk OUT/IN，控制请求实现保留 CH341 的 `0x5f/0x9a/0x95/0xa1/0xa4/0xb2` 集合。USB 事件队列现扩为 32 项，并为 EP0 SETUP/控制 OUT 保存事件快照；EP0 SETUP 现在在 USB 中断中立即处理，避免 Linux 控制传输等待前台循环导致约 5 秒超时；主循环继续排空数据事件。对 Linux 可能查询的未知字符串索引（如 `0xEE`）保持标准 STALL，并在下一个 SETUP 到来时清除 STALL、复位 EP0 数据 toggle；没有加入 Microsoft OS 专用描述符。当前 Vendor HEX 已重新编译，但尚未刷入板上，因此修复效果仍需通过真实硬件日志确认。
+当前默认构建已切回官方原有 CH341 兼容 Vendor 模式：设备描述符为 `1a86:7523`，数据端点使用 CH341 的 32 字节 bulk OUT/IN，控制请求实现保留 CH341 的 `0x5f/0x9a/0x95/0xa1/0xa4/0xb2` 集合。USB 事件队列现扩为 32 项，并为 EP0 SETUP/控制 OUT 保存事件快照；EP0 SETUP 现在在 USB 中断中立即处理，避免 Linux 控制传输等待前台循环导致约 5 秒超时；主循环继续排空数据事件。对 Linux 可能查询的未知字符串索引（如 `0xEE`）保持标准 STALL，并在下一个 SETUP 到来时清除 STALL、复位 EP0 数据 toggle；没有加入 Microsoft OS 专用描述符。Vendor 模式是当前推荐配置，实际首次枚举和打开端口的稳定性应以刷入当前 HEX 后的 `dmesg` 日志为准。
 
 ## 变化摘要
 
@@ -26,9 +26,12 @@
 
 - Device 的 BOOT 引脚由 PA3 调整为 PA7，LED 由 PA7 调整为 PA3；Host 的 LED 由 PA7 调整为 PA3。
 - Device/Host 的 LED 驱动改为适配双 LED 接法，并增加连接状态指示。
-- Host 增加 PA2 接地触发的 GPIO 中断输入；原有 PA7 角色切换在分立固件中不再使用。
-- Host RF 缓冲区由 512 B 调整为 1536 B；Device 3 KiB UART 缓冲区和 512 B RF 缓冲区保持不变。
+- Host 增加 PA2 接地触发的远端下载 GPIO 中断输入，以及 PA7 接地触发的本机 Bootloader GPIO 中断；分立固件不再使用 PA7 角色切换。
+- Device 增加 PA7 接地触发的本机 Bootloader 按键：下降沿中断只记录请求，主循环去抖后按 CH570 ROM 规定的软件复位条件进入本机 ROM Bootloader；目标 MCU 的远端 BOOT/RESET 脉冲路径保持独立。
+- Host 增加 PA7 接地触发的本机 Bootloader 按键；PA2 仍只负责向远端 Device 请求下载。进入 ROM ISP 前先在普通任务中关闭应用 USB、复位 USB SIE/FIFO、停止 USB IRQ/DMA 并移除 D+ 上拉，再由 RAM 中的函数擦除 `0x0000` 起始的 4 KiB boot stub 并执行 WCH 软件复位序列。
+- Host RF 缓冲区由官方 512 B 调整为 1024 B（此前曾为 1536 B）；Device 3 KiB UART 缓冲区和 512 B RF 缓冲区保持不变。
 - USB 取数接口改为遵守调用方给出的最大长度。
+- Host Vendor USB 不再在 USB 中断路径逐包打印整包十六进制数据，避免双向 30 ms 测试时阻塞 CH341 控制请求并触发 Linux `-110` 超时。
 - Host USB 默认使用原厂商 CH341 兼容 Vendor 接口（`1a86:7523`），由 Linux 原生 `ch341` 驱动承载；CDC 实现保留为可选实验模式，但不作为当前推荐固件。
 - Device 和 Host LED 改用启动时初始化的自由运行 SysTick 计数器，不再读取未初始化的计数器。
 - 连接后的 LED 仍显示角色状态；USB 或 RF 有效数据会触发约 50 ms 的另一只 LED 活动脉冲，随后自动恢复角色灯，不在 USB/RF 中断中直接改 GPIO。
@@ -70,7 +73,7 @@ Device 的 PA3 按用户双 LED 接法使用：输出低电平点亮低有效 LE
 |---|---|---|
 | LED | PA7 | 改为 PA3 |
 | 远端下载按键 | 无 | PA2，上拉输入，接地下降沿触发 |
-| PA7 | 原本用于 LED | 当前分立 Host 固件不再作为角色键，配置为空闲输入 |
+| PA7 | 原本用于 LED | 本机 Bootloader 按键，上拉输入、下降沿中断 |
 
 Host 的 PA3 使用输出高电平点亮另一只 LED；浮空时两只 LED 都熄灭。Host 和 Device 都采用“未连接约 1 Hz 闪烁、连接后角色灯常亮、传输时短暂切换另一只 LED”的状态指示。
 
@@ -86,6 +89,14 @@ Host 的 PA3 使用输出高电平点亮另一只 LED；浮空时两只 LED 都�
 
 把脉冲从 RF 回调移到主循环，避免在无线中断上下文中执行毫秒级延时。当前实现假定板上 BOOT 选择电路使“高电平有效”，目标 MCU 的具体有效电平由硬件开关和外围电路保证。
 
+### Device 本机 Bootloader 按键
+
+Device PA7 空闲时为上拉输入和下降沿中断。中断只记录按下时刻；主循环去抖并要求持续按住 3 秒，PA3 快速闪烁提示确认后，松开才执行危险操作，短按会取消。入口检查 `R8_GLOB_CFG_INFO & RB_CFG_BOOT_EN`，随后在 `__HIGH_CODE` 中反复尝试擦除 `0x0000` 起始的一个 4 KiB 块，执行 `FLASH_ROM_SW_RESET()` 和 WCH 安全访问/软件复位序列，让 ROM ISP 接管。当前工程 `_start` 位于 `0x0000`，故擦除会破坏启动代码；ROM Bootloader 必须启用，恢复时须烧录包含 `0x0000` 启动内容的完整 HEX。进入前 PA2/PA7 被恢复为输入状态，不会产生远端 MCU 下载脉冲。
+
+Host PA7 与 Device 一样采用“擦除 boot stub 后复位”的 ISP 流程。Host 仍保留 `0x0000` 的 4 字节 boot stub 和 `0x2000` 应用布局；PA7 长按确认后关闭应用 USB，随后在 `__HIGH_CODE` 中反复擦除 `0x0000` 起始的一个 4 KiB 块，执行 `FLASH_ROM_SW_RESET()` 和 WCH 安全访问/软件复位序列，让 ROM ISP 接管。应用主体位于 `0x2000`，不会被这次擦除影响；恢复运行时必须烧录包含 `0x0000` boot stub 的完整 HEX。Host 的 USB 会断开，随后由 CH570 ROM Bootloader 重新枚举为 `1a86:55e0`。PA2 的远端下载按键逻辑保持不变。
+
+ROM ISP 的等待窗口由芯片内部 Bootloader 决定，当前工程没有可配置的 10 秒常量；未收到烧录通信时通常约 10 秒后自动退出并断开 USB。
+
 ## 4. RF 缓冲区和数据保护变化
 
 ### 缓冲区配置
@@ -95,10 +106,10 @@ Host 的 PA3 使用输出高电平点亮另一只 LED；浮空时两只 LED 都�
 | Device 目标 UART 环形缓冲区 | 3072 B | 3072 B | 保持原值 |
 | Device RF 接收/输出环形缓冲区 | 512 B | 512 B | 恢复并保持官方原值 |
 | Host USB 输入环形缓冲区 | 512 B | 512 B | 保持原值 |
-| Host RF 接收环形缓冲区 | 512 B | 1536 B | 单角色 Host 有更多 RAM 余量，用于提高突发容忍度 |
+| Host RF 接收环形缓冲区 | 512 B | 1024 B | 在保留 1 KiB 突发容忍度的同时，为 Host 栈和中断保留余量 |
 | RF DMA 接收区 | 264 B | 264 B | 硬件例程要求，未修改 |
 
-Host RF 缓冲区增大只提高突发缓存能力，不改变 RF 单包最大载荷，也不直接提高无线物理速率。Device RAM 余量较紧，因此没有继续增大 Device 缓冲区。
+Host RF 缓冲区增大只提高突发缓存能力，不改变 RF 单包最大载荷，也不直接提高无线物理速率；从此前 1536 B 调整为 1024 B 会降低可缓存的突发长度，但可释放 512 B RAM。Device RAM 余量较紧，因此没有继续增大 Device 缓冲区。
 
 ### 新增额度（credit）机制
 
@@ -148,7 +159,7 @@ Host RF 缓冲区增大只提高突发缓存能力，不改变 RF 单包最大�
 
 两个单角色工程已通过 clean build：
 
-- Device：RAM 约 11568 / 12288 B，静态区末端到栈顶约 720 B；
-- Host：RAM 约 11208 / 12288 B，静态区末端到栈顶约 1080 B。
+- Device：长按擦除启动块的入口版本 RAM 为 11672 / 12288 B，静态区末端到栈顶约 616 B；PA7 要按住 3 秒并等待 PA3 快速闪烁，松开后才擦除地址 0 起始的 4 KiB 并复位。当前固件从地址 0 启动，需使用完整 HEX 恢复。`RF_UartTxInit()` 已移出 `.highcode`，仅在启动时从 Flash 执行，以回收 RAM 执行区。
+- Host：当前 boot-stub 擦除入口版本 RAM 为 11176 / 12288 B，静态区末端到栈顶约 1112 B；PA7 长按确认后擦除 `0x0000` 起始的 4 KiB boot stub，再执行软件复位进入 ROM ISP。Host 应用链接在 `0x2000`，恢复运行必须烧录包含 `0x0000` boot stub 的完整 HEX。
 
 代码层面已检查包长度、额度边界和 ACK/重传路径；尚未替代真实硬件测试。正式用于 200 KB 烧录前，仍应验证 BOOT/RESET 波形、按键触发、RF 干扰下的重传，以及 gRfResendFailCount == 0 和最终固件校验结果。

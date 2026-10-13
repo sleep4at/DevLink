@@ -42,6 +42,8 @@ extern "C"
 extern LINE_CODE Uart0Para;
 
 void USB_Init( void );
+/* Stop the application USB device and release D+/D- before ROM ISP reset. */
+void USB_DeviceDisable( void );
 void USB_StatusQuery( void );
 uint8_t USB_RxQuery( void *buf, typeBufSize *len );
 /* RF/USB data path event; GPIO updates are deferred to the main loop. */
