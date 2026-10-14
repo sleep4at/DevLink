@@ -26,10 +26,10 @@ uint16_t gTimeoutMax;
 uint16_t gTimeout;
 uint16_t gServerData;
 
-uint8_t gTxDataSeq;
-uint8_t gRfStatus;
-uint8_t gBoundStatus;
-uint8_t getDataProbe;
+volatile uint8_t gTxDataSeq;
+volatile uint8_t gRfStatus;
+volatile uint8_t gBoundStatus;
+volatile uint8_t getDataProbe;
 uint32_t  gRfRxFlag;
 rfPackage_t *pPkt_t;
 
@@ -41,6 +41,37 @@ volatile uint32_t gRfUartDirectCount;
 static void rfProcessRx( rfPackage_t *pPkt );
 static void rfProcessTx( void );
 static void rfProcessTimeout( void );
+
+static uint8_t rf_packet_valid( const rfPackage_t *pPkt )
+{
+    if( !pPkt || pPkt->length < PKT_DATA_OFFSET ||
+        pPkt->length > DATA_LEN_MAX_RX )
+        return 0;
+    switch( pPkt->type )
+    {
+        case PKT_CMD_BOUND_RSP:
+            return pPkt->length == PKT_DATA_OFFSET + sizeof(bound_rsp_t);
+        case PKT_CMD_RSP_STATUS:
+            if( pPkt->length == PKT_DATA_OFFSET ) return 1;
+            if( pPkt->length < PKT_DATA_OFFSET + 1 ) return 0;
+            {
+                const rfRsp_t *rsp = (const rfRsp_t *)(pPkt + 1);
+                if( rsp->opcode == OPCODE_BSP )
+                    return pPkt->length == PKT_DATA_OFFSET + 1 + sizeof(rsp->buad_t);
+                if( rsp->opcode == OPCODE_DATA )
+                    return pPkt->length > PKT_DATA_OFFSET + 1;
+                if( rsp->opcode == OPCODE_ACK )
+                    return pPkt->length == PKT_DATA_OFFSET + 1;
+                return 0;
+            }
+        case PKT_DATA_RSP_ACK:
+            if( pPkt->length == PKT_DATA_OFFSET ) return 1;
+            if( pPkt->length < PKT_DATA_OFFSET + 2 ) return 0;
+            return ((const rfRsp_t *)(pPkt + 1))->opcode == OPCODE_DATA;
+        default:
+            return 0;
+    }
+}
 
 // tf status callbacks
 rfStatusCBs_t rfCBs =
@@ -59,6 +90,9 @@ struct simple_buf *pRfBuf = NULL;
 uint8_t volatile RF_bound_Flag;
 static volatile uint8_t gBootPulsePending;
 static volatile uint8_t gBootPulseSendSync;
+/* Receive capacity advertised by the Host in ACK/status packets (16-byte
+ * units). Zero means retain UART bytes and request status instead of sending. */
+static volatile uint8_t gHostCredit;
 static volatile uint8_t gSelfBootPending;
 static volatile uint32_t gSelfBootEdgeTick;
 static volatile uint8_t gDeviceLedPhase;
@@ -96,12 +130,18 @@ static uint8_t Device_RfCredit( void )
 
     if( pRfBuf )
     {
-        PFIC_DisableAllIRQ();
+        uint32_t irq_state = __risc_v_disable_irq();
         free_len = pRfBuf->buf_len - pRfBuf->data_len;
-        PFIC_EnableAllIRQ();
+        __risc_v_enable_irq( irq_state );
     }
     free_len /= RF_CREDIT_UNIT;
     return (free_len > 0xFFu) ? 0xFFu : (uint8_t)free_len;
+}
+
+static typeBufSize Device_HostCreditLength( uint8_t credit )
+{
+    uint32_t len = (uint32_t)credit * RF_CREDIT_UNIT;
+    return (len > DATA_LEN_MAX_TX) ? DATA_LEN_MAX_TX : (typeBufSize)len;
 }
 
 /* The target BOOT/RESET sequence is deliberately deferred out of the RF
@@ -341,6 +381,16 @@ static void rf_buffer_create(struct simple_buf **buf)
 __HIGH_CODE
 static void rf_disconnect( void )
 {
+    /* A disconnected link must not carry an incomplete transaction or old
+     * received bytes into the next pairing. */
+    simple_buf_reset( pRfBuf );
+    gTxBuf.status = STA_IDLE;
+    gTxBuf.resendCount = 0;
+    gTxDataSeq = 0;
+    getDataProbe = 0;
+    gTimeout = 0;
+    gRfRxFlag = 0;
+    gRfStatus = RF_STATUS_IDLE;
     gBoundStatus = BOUND_STATUS_IDLE;
     UART_SetTimer( ADV_INTERVAL );
     rf_tx_set_sync_word( AA );
@@ -399,10 +449,22 @@ static void rf_bound( bound_rsp_t *rsp )
 __HIGH_CODE
 static void rfProcessRx( rfPackage_t *pPkt )
 {
+    if( !rf_packet_valid( pPkt ) )
+    {
+        /* RX completion is terminal, even for a rejected packet. Retry the
+         * unchanged transaction rather than leave STA_BUSY awaiting an IRQ
+         * that may never arrive. Preserve WAITRSP/REWAIT for retry accounting. */
+        rfProcessTimeout();
+        return;
+    }
     if( gTxDataSeq == pPkt->seq )
     {
         if( pPkt->type == PKT_DATA_RSP_ACK )
         {
+            /* A zero reserved byte from the original Host firmware means
+             * credit was not implemented there; preserve legacy operation. */
+            gHostCredit = (pPkt->resv & RF_CREDIT_VALID) ?
+                          (pPkt->resv & 0x7Fu) : 0xFFu;
             // Êý¾Ý·¢ËÍ³É¹¦
             if( pPkt->length > PKT_DATA_OFFSET+1 )
             {
@@ -415,11 +477,20 @@ static void rfProcessRx( rfPackage_t *pPkt )
                     gRfRxFlag = write_buf( pRfBuf, pRsp_t->other.rspData, &len );
                     if( !len )
                     {
-                        /* Safety fallback for a stale credit value.  It
-                         * preserves bytes, but can briefly block here while
-                         * UART FIFO space becomes available. */
+                        /* The ACK also carries reverse-direction UART data.
+                         * If the advertised credit was stale, do not consume
+                         * this ACK: retry the original DATA packet so the
+                         * Host resends the same response after space frees. */
                         gRfUartDirectCount++;
-                        UART_Send(pRsp_t->other.rspData,pPkt_t->length-PKT_DATA_OFFSET-1);
+                        gRfStatus = RF_STATUS_WAIT;
+                        /* This is a local backpressure event, not a
+                         * completed transaction.  Give the unchanged DATA
+                         * packet the same bounded retry budget as a radio
+                         * timeout; otherwise STA_RESEND is observed with a
+                         * zero counter and the packet is discarded. */
+                        gTxBuf.resendCount = RESEND_COUNT;
+                        gTxBuf.status = STA_RESEND;
+                        return;
                     }
                     if( !R8_UART_TFC )
                     {
@@ -436,6 +507,10 @@ static void rfProcessRx( rfPackage_t *pPkt )
         else if( pPkt->type == PKT_CMD_RSP_STATUS )
         {
             rfRsp_t *pRsp_t = (rfRsp_t *)(pPkt+1);
+            /* Status resv bit 0 remains remote-boot; bit 7 marks credit
+             * support and bits 1..6 carry 32-byte Host queue units. */
+            gHostCredit = (pPkt->resv & RF_CREDIT_VALID) ?
+                          (uint8_t)(((pPkt->resv & RF_STATUS_CREDIT_MASK) >> 1) * 2u) : 0xFFu;
             if( pPkt->resv & RF_CTRL_ENTER_BOOT )
             {
                 gBootPulsePending = 1;
@@ -544,8 +619,13 @@ static void rfProcessRx( rfPackage_t *pPkt )
                     gRfRxFlag = write_buf( pRfBuf, pRsp_t->other.rspData, &len );
                     if( !len )
                     {
+                        /* Preserve the packet for retry when reverse data did
+                         * not fit; never block or silently discard it here. */
                         gRfUartDirectCount++;
-                        UART_Send(pRsp_t->other.rspData,pPkt_t->length-PKT_DATA_OFFSET-1);
+                        gRfStatus = RF_STATUS_WAIT;
+                        gTxBuf.resendCount = RESEND_COUNT;
+                        gTxBuf.status = STA_RESEND;
+                        return;
                     }
                     if( !R8_UART_TFC )
                     {
@@ -564,6 +644,10 @@ static void rfProcessRx( rfPackage_t *pPkt )
         gTxBuf.status = STA_IDLE;
         gTxDataSeq ++;
         gTimeout = 0;
+    }
+    else
+    {
+        rfProcessTimeout();
     }
 }
 
@@ -602,12 +686,20 @@ static void rfProcessTx( void )
 __HIGH_CODE
 static  void rfProcessTimeout( void )
 {
-    gTxBuf.status = STA_RESEND;
-    if( gRfStatus == RF_STATUS_WAITRSP )
+    /* First and repeated ACK waits belong to one transaction. Initialize
+     * the retry budget only once; REWAIT must not reset it. */
+    if( gRfStatus == RF_STATUS_WAITRSP || gRfStatus == RF_STATUS_REWAIT )
     {
-        gTxBuf.resendCount = RESEND_COUNT;
+        gTxBuf.status = STA_RESEND;
+        if( gRfStatus == RF_STATUS_WAITRSP )
+        {
+            gTxBuf.resendCount = RESEND_COUNT;
+        }
+        return;
     }
-    else
+
+    gTxBuf.status = STA_RESEND;
+    if( gBoundStatus )
     {
         if( gBoundStatus == BOUND_STATUS_WAIT )
         {
@@ -638,7 +730,9 @@ static  void rfProcessTimeout( void )
  *
  * @return  None.
  */
-__HIGH_CODE
+/* Foreground scheduler may execute from Flash. IRQ callbacks and the
+ * destructive ISP entry remain RAM-resident. Prevent inlining into main. */
+__attribute__((noinline))
 void RF_StatusQuery( void )
 {
     uint8_t s;
@@ -650,7 +744,7 @@ void RF_StatusQuery( void )
     {
         rfPackage_t *pPkt_t = (rfPackage_t *)gTxBuf.TxBuf;
 
-        gTxBuf.len  = DATA_LEN_MAX_TX;
+        gTxBuf.len  = Device_HostCreditLength( gHostCredit );
         s = UART_RxQuery( (void *)(pPkt_t+1), &gTxBuf.len );
         // ·¢ËÍÊý¾Ý
         if( s == 0 )
@@ -703,7 +797,7 @@ void RF_StatusQuery( void )
                 pPkt_t->length = PKT_DATA_OFFSET;
                 gTxBuf.status = STA_BUSY;
                 pPkt_t->seq = gTxDataSeq;
-                pPkt_t->resv = 0;
+                pPkt_t->resv = Device_RfCredit();
                 rf_tx_start( gTxBuf.TxBuf, 60 );
             }
         }
@@ -727,7 +821,11 @@ void RF_StatusQuery( void )
             // ·¢ËÍÊ§°Ü¶ªÆú
             gRfResendFailCount++;
             PRINT(" resend fail.%d\n",gTxBuf.TxBuf[1]);
-            gTxBuf.status = STA_IDLE;
+            /* ACK loss makes peer acceptance ambiguous. Do not build a new
+             * payload at the same sequence and let the Host mistake it for a
+             * duplicate. End this failed session and pair again. The failed
+             * in-flight transaction is not guaranteed delivered. */
+            rf_disconnect();
         }
     }
 }
@@ -760,6 +858,7 @@ void RF_UartTxInit( void )
     GPIOA_ModeCfg( LED_PIN, GPIO_ModeIN_Floating );
     gTxDataSeq = 0;
     gRfRxFlag = 0;
+    gHostCredit = 0;
     gRfResendCount = 0;
     gRfResendFailCount = 0;
     gRfUartDirectCount = 0;

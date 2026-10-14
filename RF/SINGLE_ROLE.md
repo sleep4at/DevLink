@@ -19,9 +19,9 @@ LED 闪烁使用主频自由运行计数器；已在启动时初始化，不依�
 
 注意：单角色方案取消了 PA7 长按角色切换功能；切换角色需要重新烧录另一份固件。
 
-数据保护：Device 在状态请求中按 16 字节单位报告 UART 输出队列的可用额度，Host 按额度读取 USB 数据；Device 发出的每个数据包也携带同一额度，因而 Host 在 ACK 中返回 USB 数据时仍受限于 Device 的可用空间。Host 接收 RF 数据时如果整包无法写入缓冲区则不发送 ACK，Device 会按原序号超时重传。额度为 0 时只发送空 ACK/状态响应，不会强行取数。
+数据保护：Device 在状态请求和数据包中按 16 字节单位报告 UART 输出队列的可用额度，Host 按额度读取 USB 数据，并在 ACK 中返回 Host RF 接收队列额度；状态响应 `resv` bit 0 保留远端下载命令，bit 7 表示额度有效，bit 1..6 以 32 字节单位报告 Host 额度。旧版 Host 不置有效位时，Device 按旧协议继续工作。Device 根据 Host 额度限制目标 UART 上行包长度，额度为 0 时保留 UART 队列数据并发送状态探测，不会继续盲发。Host 若仍遇到整包无法入队，会不确认该包并在短重试窗口重新监听。缓冲区额度可避免正常反压下溢出，但目标 UART 没有硬件流控，持续输入超过 3 KiB 队列容量仍可能丢数据；无线重试耗尽会断开并重新配对，不承诺无限时无损。
 
-当前主要缓冲区：Device 目标 UART 3 KiB、Device RF 输出 512 B；Host USB 输入 512 B、Host RF 接收 1024 B。当前构建链接 RAM 使用：Device 11672/12288 B，静态区末端到栈顶约 616 B；Host 11176/12288 B，静态区末端到栈顶约 1112 B。Host 增加了 USB IRQ 调试输出抑制和 boot-stub 擦除式 ROM ISP 复位序列。
+当前主要缓冲区：Device 目标 UART 3 KiB、Device RF 输出 512 B；Host USB 输入 512 B、Host RF 接收 1024 B。当前构建链接器报告 RAM 使用：Device 11220/12288 B（名义剩余 1068 B），Host 10824/12288 B（名义剩余 1464 B）。该数值是链接器 RAM 区域占用差，不是运行时栈高水位测量；工程没有栈水位测试。Host 增加了 USB IRQ 调试输出抑制和 boot-stub 擦除式 ROM ISP 复位序列。
 
 固件提供运行统计变量：Device 的 gRfResendCount、gRfResendFailCount、gRfUartDirectCount，以及 Host 的 gRfBackpressureCount、gRfCreditZeroCount，可在调试版本中观察重传、额度为零和安全回退次数。
 

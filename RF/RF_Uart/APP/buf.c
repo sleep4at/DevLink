@@ -37,6 +37,19 @@ struct simple_buf *simple_buf_create(struct simple_buf *buf,
     return buf;
 }
 
+__HIGH_CODE
+void simple_buf_reset(struct simple_buf *buf)
+{
+    uint32_t irq_state;
+
+    if( !buf ) return;
+    irq_state = __risc_v_disable_irq();
+    buf->read = buf->start;
+    buf->write = buf->start;
+    buf->data_len = 0;
+    __risc_v_enable_irq( irq_state );
+}
+
 /*********************************************************************
  * @fn      write_buf
  *
@@ -52,16 +65,23 @@ __HIGH_CODE
 typeBufSize write_buf(struct simple_buf *buf, void *src, typeBufSize *len )
 {
     uint32_t free_len,data_len;
+    uint32_t irq_state;
     typeBufSize tmp_len;
 
-    PFIC_DisableAllIRQ();
+    /* A buffer may have an ISR producer and a foreground/other-ISR
+     * consumer.  Protect the complete reservation/copy/commit sequence.
+     * The previous code re-enabled interrupts between these steps, so two
+     * writers could use the same write pointer and data_len could be lost;
+     * that manifests as stalled transfers and replayed old bytes. */
+    irq_state = __risc_v_disable_irq();
     free_len = buf->buf_len - buf->data_len;
-    PFIC_EnableAllIRQ();
-
     if( free_len < *len )
     {
-        PRINT("#ERR\n");
+        /* Full-buffer backpressure is handled by the caller.  This function
+         * can run from the RF interrupt, so never block here on the debug
+         * UART. */
         *len = 0;
+        __risc_v_enable_irq( irq_state );
         return buf->data_len;
     }
     tmp_len = (buf->end - buf->write);
@@ -79,11 +99,9 @@ typeBufSize write_buf(struct simple_buf *buf, void *src, typeBufSize *len )
         __MCPY( buf->write, src, (uint8_t *)((uint8_t *)src+tmp_len) );
         buf->write += tmp_len;
     }
-    // 关闭中断
-    PFIC_DisableAllIRQ();
     data_len = buf->data_len + *len;
     buf->data_len = data_len;
-    PFIC_EnableAllIRQ();
+    __risc_v_enable_irq( irq_state );
     return  data_len;
 }
 
@@ -102,15 +120,19 @@ typeBufSize read_buf( struct simple_buf *buf, void *dst, typeBufSize *len )
 {
     uint32_t writeAddr;
     uint32_t data_len;
+    uint32_t irq_state;
 
-    PFIC_DisableAllIRQ();
+    /* Keep the read reservation and data_len update atomic with writers.
+     * This also restores the caller's interrupt state instead of blindly
+     * enabling all interrupts when called from an ISR. */
+    irq_state = __risc_v_disable_irq();
     writeAddr = (uint32_t)buf->write;
     data_len = buf->data_len;
-    PFIC_EnableAllIRQ();
 
     if( !data_len )
     {
         *len = 0;
+        __risc_v_enable_irq( irq_state );
         return 0;
     }
     if( data_len < *len )
@@ -143,10 +165,8 @@ typeBufSize read_buf( struct simple_buf *buf, void *dst, typeBufSize *len )
             buf->read += tmp_len;
         }
     }
-    // 关闭中断
-    PFIC_DisableAllIRQ();
     data_len = buf->data_len - *len;
     buf->data_len = data_len;
-    PFIC_EnableAllIRQ();
+    __risc_v_enable_irq( irq_state );
     return data_len;
 }

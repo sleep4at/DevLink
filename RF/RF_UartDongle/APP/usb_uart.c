@@ -169,17 +169,17 @@ uint8_t CH341_Reg_val[CH341_REG_NUM];
 
 
 /* 厂商模式下串口参数变化 */
-uint8_t VENSer0ParaChange = 0;
+volatile uint8_t VENSer0ParaChange = 0;
 
 /* 厂商模式下串口发送数据标志 */
-uint8_t VENSer0SendFlag = 0;
+volatile uint8_t VENSer0SendFlag = 0;
 
 /* 厂商模式下modem信号检测 */
 uint8_t UART0_RTS_Val = 0; //输出 表示DTE请求DCE发送数据
 uint8_t UART0_DTR_Val = 0; //输出 数据终端就绪
 uint8_t UART0_OUT_Val = 0; //自定义modem信号（CH340手册）
 
-uint8_t UART_Status;
+volatile uint8_t UART_Status;
 
 uint8_t UART0_DCD_Val = 0;
 uint8_t UART0_DCD_Change = 0;
@@ -215,29 +215,39 @@ uint32_t gUartRxCount;
 
 /* USB缓存定义，所有端点全部定义 */
 /* 端点1 -- IN状态 */
-uint8_t Ep1DataINFlag = 0;
+volatile uint8_t Ep1DataINFlag = 0;
 
 /* 端点1下传数据 */
-uint8_t Ep1DataOUTFlag = 0;
-uint8_t Ep1DataOUTLen = 0;
+volatile uint8_t Ep1DataOUTFlag = 0;
+volatile uint8_t Ep1DataOUTLen = 0;
 __aligned(4) uint8_t Ep1OUTDataBuf[MAX_PACKET_SIZE];
 
 
 /* 端点2下传数据 */
-//uint8_t Ep2DataOUTFlag = 0;
-//uint8_t Ep2DataOUTLen = 0;
-//__aligned(4) uint8_t Ep2OUTDataBuf[MAX_PACKET_SIZE];
-uint32_t gEnd2DataLen;
+/* EP2 OUT is the CH341 bulk data endpoint. Retain one complete packet
+ * outside the RF ring so a full RF queue cannot lose an already-ACKed USB
+ * packet. */
+volatile uint8_t Ep2DataOUTFlag = 0;
+volatile uint8_t Ep2DataOUTLen = 0;
+__aligned(4) uint8_t Ep2OUTDataBuf[MAX_PACKET_SIZE];
 
 /* 保存USB中断的状态 ->改成几组的操作方式 */
 #define USB_IRQ_FLAG_NUM     32
+/* Keep one slot exclusively for EP0 SETUP requests.  Bulk traffic must not
+ * be able to starve the control pipe while Linux opens the CH341 port. */
+#define USB_IRQ_DATA_SLOTS   (USB_IRQ_FLAG_NUM - 1)
+#define USB_IRQ_SETUP_SLOT   (USB_IRQ_FLAG_NUM - 1)
 
-uint8_t usb_irq_w_idx = 0;
-uint8_t usb_irq_r_idx = 0;
+volatile uint8_t usb_irq_w_idx = 0;
+volatile uint8_t usb_irq_r_idx = 0;
 
 volatile uint8_t usb_irq_len[USB_IRQ_FLAG_NUM];
 volatile uint8_t usb_irq_pid[USB_IRQ_FLAG_NUM];
 volatile uint8_t usb_irq_flag[USB_IRQ_FLAG_NUM];
+/* Number of USB events rejected because the software event ring was full.
+ * This is intentionally diagnostic only; a full ring now applies backpressure
+ * instead of overwriting an event that the foreground has not processed. */
+volatile uint32_t gUsbIrqDropCount;
 /* EP0 is also the DMA buffer. Keep a per-event snapshot so queued
  * SETUP/control-OUT data cannot be overwritten by the next request. */
 uint8_t usb_irq_ep0_snapshot[USB_IRQ_FLAG_NUM][USB_EP0_EVENT_DATA_SIZE];
@@ -532,33 +542,122 @@ void USB_IRQHandler(void)
   {
     /* 除setup包处理 */
     if((R8_USB_INT_ST & MASK_UIS_TOKEN) != MASK_UIS_TOKEN){     // 非空闲
-      /* 直接写入 */
-      usb_irq_flag[usb_irq_w_idx] = 1;
-      usb_irq_pid[usb_irq_w_idx]  = R8_USB_INT_ST;  //& 0x3f;//(0x30 | 0x0F);
-      usb_irq_len[usb_irq_w_idx]  = R8_USB_RX_LEN;
+      uint8_t irq_slot = usb_irq_w_idx;
+      uint8_t irq_token = R8_USB_INT_ST;
 
-      switch(usb_irq_pid[usb_irq_w_idx]& 0x3f){   //分析当前的端点
+      /* CH341 bulk endpoint 2 carries the UART byte stream.  Handle its
+       * completion in-place instead of first enqueueing an event: if the
+       * generic event ring fills after the SIE accepted an OUT packet, the
+       * host may already have received ACK and will not retransmit bytes we
+       * failed to copy.  The dedicated OUT slot below provides real
+       * backpressure (NAK until the entire packet enters pUsbBuf). */
+      if( (irq_token & 0x3f) == (UIS_TOKEN_OUT | 2) )
+      {
+        if( R8_USB_INT_FG & RB_U_TOG_OK )
+        {
+          R8_UEP2_CTRL ^= RB_UEP_R_TOG;
+          Ep2DataOUTLen = R8_USB_RX_LEN;
+          if( Ep2DataOUTLen > MAX_PACKET_SIZE )
+            Ep2DataOUTLen = MAX_PACKET_SIZE;
+          memcpy( Ep2OUTDataBuf, Ep2Buffer, Ep2DataOUTLen );
+          Ep2DataOUTFlag = 1;
+          R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
+        }
+        R8_USB_INT_FG = RB_UIF_TRANSFER;
+      }
+      else if( (irq_token & 0x3f) == (UIS_TOKEN_IN | 2) )
+      {
+        /* No foreground work is associated with bulk-IN completion. */
+        R8_UEP2_CTRL ^= RB_UEP_T_TOG;
+        R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_T_RES) | IN_NAK;
+        R8_USB_INT_FG = RB_UIF_TRANSFER;
+      }
+
+      /* EP0 data/status stages are control traffic and must not wait behind
+       * a burst of bulk RF events.  Process them synchronously, using the
+       * reserved slot only as a snapshot for USB_IRQProcessHandler(). */
+      else if( ((irq_token & 0x3f) == (UIS_TOKEN_OUT | 0)) ||
+          ((irq_token & 0x3f) == (UIS_TOKEN_IN  | 0)) )
+      {
+        if( ((irq_token & 0x3f) == (UIS_TOKEN_OUT | 0)) &&
+            !(R8_USB_INT_FG & RB_U_TOG_OK) )
+        {
+          /* Ignore a duplicate DATA packet; the host will retry with the
+           * correct DATA toggle. */
+          R8_USB_INT_FG = RB_UIF_TRANSFER;
+        }
+        else
+        {
+          uint8_t saved_r_idx = usb_irq_r_idx;
+          usb_irq_flag[USB_IRQ_SETUP_SLOT] = 1;
+          usb_irq_pid[USB_IRQ_SETUP_SLOT] = irq_token;
+          usb_irq_len[USB_IRQ_SETUP_SLOT] = R8_USB_RX_LEN;
+          if( (irq_token & 0x3f) == (UIS_TOKEN_OUT | 0) )
+          {
+            uint8_t copy_len = usb_irq_len[USB_IRQ_SETUP_SLOT];
+            if( copy_len > USB_EP0_EVENT_DATA_SIZE )
+              copy_len = USB_EP0_EVENT_DATA_SIZE;
+            memcpy( usb_irq_ep0_snapshot[USB_IRQ_SETUP_SLOT], Ep0Buffer,
+                    copy_len );
+          }
+          usb_irq_r_idx = USB_IRQ_SETUP_SLOT;
+          USB_IRQProcessHandler();
+          usb_irq_flag[USB_IRQ_SETUP_SLOT] = 0;
+          usb_irq_r_idx = saved_r_idx;
+          R8_USB_INT_FG = RB_UIF_TRANSFER;
+        }
+      }
+      /* The write index points at the next free slot.  If it is still marked
+       * valid, the ring is full; never overwrite the unread event. */
+      else if( usb_irq_flag[irq_slot] )
+      {
+        gUsbIrqDropCount++;
+        switch( irq_token & 0x3f )
+        {
+          case UIS_TOKEN_OUT | 0:
+            R8_UEP0_CTRL = (R8_UEP0_CTRL & 0xf3) | 0x08;
+            break;
+          case UIS_TOKEN_OUT | 1:
+            R8_UEP1_CTRL = (R8_UEP1_CTRL & 0xf3) | 0x08;
+            break;
+          case UIS_TOKEN_OUT | 2:
+            R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
+            break;
+          default:
+            break;
+        }
+        R8_USB_INT_FG = RB_UIF_TRANSFER;
+      }
+      else
+      {
+        /* 直接写入 */
+        usb_irq_flag[irq_slot] = 1;
+        usb_irq_pid[irq_slot]  = irq_token;
+        usb_irq_len[irq_slot]  = R8_USB_RX_LEN;
+
+      switch(irq_token & 0x3f){   //分析当前的端点
         case UIS_TOKEN_OUT | 2:
         {
           if( R8_USB_INT_FG & RB_U_TOG_OK ){   //不同步的数据包将丢弃
             R8_UEP2_CTRL ^=  RB_UEP_R_TOG;
-            /* 保存数据 */
-            typeBufSize data_len;
-
-            data_len = usb_irq_len[usb_irq_w_idx];
-            gEnd2DataLen = write_buf( pUsbBuf,Ep2Buffer, &data_len );
-            if( !data_len )
-            {
-                PRINT("why??? l=%d\n ", gEnd2DataLen );
-            }
-            if( gEnd2DataLen > (USB_BUF_LEN-MAX_PACKET_SIZE) )
-            {
-                R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK; //OUT_NAK
-            }
+            /* Retain the packet and apply backpressure until the complete
+             * packet has entered pUsbBuf. */
+            Ep2DataOUTLen = usb_irq_len[irq_slot];
+            if( Ep2DataOUTLen > MAX_PACKET_SIZE )
+                Ep2DataOUTLen = MAX_PACKET_SIZE;
+            memcpy( Ep2OUTDataBuf, Ep2Buffer, Ep2DataOUTLen );
+            /* Keep the pending flag even for a zero-length bulk OUT.  A ZLP
+             * is a valid USB transaction (and is emitted by some CH341
+             * drivers while flushing a transfer).  The endpoint is already
+             * NAKed below, so the foreground must consume/commit the pending
+             * transaction and restore ACK; otherwise EP2 remains NAK forever
+             * and all later UART writes appear to disappear. */
+            Ep2DataOUTFlag = 1;
+            R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
           }
           else
           {
-              usb_irq_flag[usb_irq_w_idx] = 0;
+              usb_irq_flag[irq_slot] = 0;
           }
         }break;
         case UIS_TOKEN_IN | 2:{ //endpoint 2# 批量端点上传完成
@@ -573,19 +672,19 @@ void USB_IRQHandler(void)
             for(j=0; j<(MAX_PACKET_SIZE/4); j++)
               ((UINT32 *)Ep1OUTDataBuf)[j] = ((UINT32 *)Ep1Buffer)[j];
           }
-          else usb_irq_flag[usb_irq_w_idx] = 0;
+          else usb_irq_flag[irq_slot] = 0;
         }break;
         case UIS_TOKEN_IN | 1:{  //endpoint 1# 批量端点上传完成
           R8_UEP1_CTRL ^=  RB_UEP_T_TOG;
           R8_UEP1_CTRL = (R8_UEP1_CTRL & 0xfc) | IN_NAK; //IN_NAK
         }break;
         case UIS_TOKEN_OUT | 0:{    // endpoint 0
-          uint8_t copy_len = usb_irq_len[usb_irq_w_idx];
+          uint8_t copy_len = usb_irq_len[irq_slot];
           if( copy_len > USB_EP0_EVENT_DATA_SIZE ) copy_len = USB_EP0_EVENT_DATA_SIZE;
-          memcpy( usb_irq_ep0_snapshot[usb_irq_w_idx], Ep0Buffer, copy_len );
+          memcpy( usb_irq_ep0_snapshot[irq_slot], Ep0Buffer, copy_len );
           if( R8_USB_INT_FG & RB_U_TOG_OK )   //不同步的数据包将丢弃
             R8_UEP0_CTRL = (R8_UEP0_CTRL & 0xf3) | 0x08; //OUT_NAK
-          else usb_irq_flag[usb_irq_w_idx] = 0;
+          else usb_irq_flag[irq_slot] = 0;
         }break;
         case UIS_TOKEN_IN | 0:{  //endpoint 0
           R8_UEP0_CTRL = (R8_UEP0_CTRL & 0xfc) | IN_NAK; //IN_NAK
@@ -593,12 +692,13 @@ void USB_IRQHandler(void)
       }
 
       /* 切到下一个写地址 */
-      if(usb_irq_flag[usb_irq_w_idx]){
+      if(usb_irq_flag[irq_slot]){
         usb_irq_w_idx++;
-        if(usb_irq_w_idx >= USB_IRQ_FLAG_NUM) usb_irq_w_idx = 0;
+        if(usb_irq_w_idx >= USB_IRQ_DATA_SLOTS) usb_irq_w_idx = 0;
       }
 
       R8_USB_INT_FG = RB_UIF_TRANSFER;
+      }
     }
 
     /* setup包处理 */
@@ -609,30 +709,50 @@ void USB_IRQHandler(void)
        * request; otherwise a deliberately STALLed request (e.g. string 0xEE)
        * can poison all subsequent control transfers. */
       R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_NAK | UEP_T_RES_NAK;
-      /* 与之前的处理接轨 -- UIS_TOKEN_SETUP */
-      /* 直接写入 */
-      usb_irq_flag[usb_irq_w_idx] = 1;
-      usb_irq_pid[usb_irq_w_idx]  = UIS_TOKEN_SETUP | 0;  //保留之前的标志
-      usb_irq_len[usb_irq_w_idx]  = 8;
-      memcpy( usb_irq_ep0_snapshot[usb_irq_w_idx], Ep0Buffer, USB_EP0_EVENT_DATA_SIZE );
+      /* EP0 SETUP uses a dedicated slot and is dispatched immediately.  It
+       * remains available even if all bulk-event slots are occupied. */
+      {
+        uint8_t saved_r_idx = usb_irq_r_idx;
+        usb_irq_flag[USB_IRQ_SETUP_SLOT] = 1;
+        usb_irq_pid[USB_IRQ_SETUP_SLOT]  = UIS_TOKEN_SETUP | 0;
+        usb_irq_len[USB_IRQ_SETUP_SLOT]  = 8;
+        memcpy( usb_irq_ep0_snapshot[USB_IRQ_SETUP_SLOT], Ep0Buffer,
+                USB_EP0_EVENT_DATA_SIZE );
       /* Dispatch this control request now. Deferring EP0 SETUP handling to
        * the foreground loop can exceed the host's control-transfer timeout
        * while RF/USB events are arriving. */
       {
-        uint8_t setup_idx = usb_irq_w_idx;
-        usb_irq_w_idx++;
-        if(usb_irq_w_idx >= USB_IRQ_FLAG_NUM) usb_irq_w_idx = 0;
+        uint8_t setup_idx = USB_IRQ_SETUP_SLOT;
         usb_irq_r_idx = setup_idx;
         USB_IRQProcessHandler();
         usb_irq_flag[setup_idx] = 0;
-        usb_irq_r_idx = usb_irq_w_idx;
+        usb_irq_r_idx = saved_r_idx;
       }
 
-      R8_USB_INT_FG = RB_UIF_TRANSFER;
+        R8_USB_INT_FG = RB_UIF_TRANSFER;
+      }
     }
   }
   else if ( R8_USB_INT_FG & RB_UIF_BUS_RST )  // USB总线复位
   {
+    /* A bus reset terminates any in-flight bulk transaction.  Do not leave a
+     * retained OUT packet or an old event queued across the new data-toggle
+     * epoch; doing so can replay stale bytes or leave the endpoint NAKed after
+     * the host has re-enumerated. */
+    Ep1DataOUTFlag = 0;
+    Ep2DataOUTFlag = 0;
+    Ep1DataOUTLen = 0;
+    Ep2DataOUTLen = 0;
+    /* A bus reset starts a new tty session.  Flush bytes accepted before the
+     * reset; retaining them is observable as old data being sent again after
+     * the application reopens the port. */
+    simple_buf_reset( pUsbBuf );
+    usb_irq_w_idx = 0;
+    usb_irq_r_idx = 0;
+    for( i = 0; i < USB_IRQ_FLAG_NUM; ++i )
+    {
+      usb_irq_flag[i] = 0;
+    }
 #if ( USB_WORK_MODE== USB_VENDOR_MODE)
     {
       R8_UEP0_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK;
@@ -698,7 +818,11 @@ void USB_IRQProcessHandler( void )   /* USB中断服务程序 */
     {
         i = usb_irq_r_idx;
       usb_irq_r_idx++;
-      if(usb_irq_r_idx >= USB_IRQ_FLAG_NUM) usb_irq_r_idx = 0;
+      /* USB_IRQ_SETUP_SLOT is reserved for synchronous EP0 control
+       * transfers.  Normal queued events occupy only USB_IRQ_DATA_SLOTS;
+       * using USB_IRQ_FLAG_NUM here would make the reader stop on the
+       * reserved slot after 31 events and leave bulk OUT permanently NAKed. */
+      if(usb_irq_r_idx >= USB_IRQ_DATA_SLOTS) usb_irq_r_idx = 0;
       if( ((usb_irq_pid[i] & 0x3f) == (UIS_TOKEN_SETUP | 0)) ||
           ((usb_irq_pid[i] & 0x3f) == (UIS_TOKEN_OUT | 0)) )
       {
@@ -760,9 +884,10 @@ void USB_IRQProcessHandler( void )   /* USB中断服务程序 */
           Ep1DataOUTFlag = 1;
           Ep1DataOUTLen = len;
           VENSer0SendFlag = 1;
-          PFIC_DisableIRQ(USB_IRQn);
-          R8_UEP1_CTRL = R8_UEP1_CTRL & 0xf3; //OUT_ACK
-          PFIC_EnableIRQ(USB_IRQn);
+          /* The ISR has already NAKed EP1 and retained the packet.  Do not
+           * ACK here: the foreground retry path ACKs only after the entire
+           * packet has entered pUsbBuf.  ACKing early allows the host to
+           * overwrite Ep1OUTDataBuf while RF is back-pressured. */
 #endif
           break;
         }
@@ -1912,6 +2037,11 @@ void InitUSBDevPara(void)
   {
     usb_irq_flag[i] = 0;
   }
+  Ep2DataOUTFlag = 0;
+  Ep2DataOUTLen = 0;
+  usb_irq_w_idx = 0;
+  usb_irq_r_idx = 0;
+  gUsbIrqDropCount = 0;
 }
 
 /*******************************************************************************
@@ -1939,7 +2069,9 @@ void InitUSBDevice(void)
  *
  * @return  None.
  */
-__HIGH_CODE
+/* Foreground only. Keep IRQ/ACK callbacks in RAM, but do not spend scarce
+ * stack space on this scheduler's executable image. */
+__attribute__((noinline))
 void USB_StatusQuery( void )
 {
 
@@ -1956,6 +2088,22 @@ void USB_StatusQuery( void )
         USB_IRQProcessHandler( );
         usb_irq_flag[event_idx] = 0;
     }
+    /* Keep packet commit, pending flag and endpoint ACK in one critical
+     * section. RF consumers must never reopen an endpoint with a pending
+     * packet; only this producer may ACK after committing the whole packet. */
+    uint32_t out_irq_state = __risc_v_disable_irq();
+    if( Ep2DataOUTFlag )
+    {
+        typeBufSize packet_len = Ep2DataOUTLen;
+        typeBufSize accepted_len = packet_len;
+        write_buf( pUsbBuf, Ep2OUTDataBuf, &accepted_len );
+        if( accepted_len == packet_len )
+        {
+            Ep2DataOUTFlag = 0;
+            R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
+        }
+    }
+    __risc_v_enable_irq( out_irq_state );
     if( devinf.UsbAddress )
     {
 #if ( USB_WORK_MODE== USB_CDC_MODE )
@@ -1975,19 +2123,36 @@ void USB_StatusQuery( void )
         /* Retry the retained packet only after RF has freed queue space. */
         if( Ep1DataOUTFlag )
         {
+            uint32_t irq_state = __risc_v_disable_irq();
             typeBufSize retry_len = Ep1DataOUTLen;
             typeBufSize packet_len = retry_len;
             write_buf( pUsbBuf, Ep1OUTDataBuf, &retry_len );
             if( retry_len == packet_len )
             {
                 Ep1DataOUTFlag = 0;
-                PFIC_DisableIRQ(USB_IRQn);
                 R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
-                PFIC_EnableIRQ(USB_IRQn);
             }
+            __risc_v_enable_irq( irq_state );
         }
 #else
 #if ( USB_WORK_MODE== USB_VENDOR_MODE)
+        /* Some CH341 variants use the configuration endpoint for OUT data.
+         * Keep this path lossless as well: the ISR retains one packet and
+         * leaves the endpoint NAKed until RF buffer space is available. */
+        if( Ep1DataOUTFlag )
+        {
+            uint32_t irq_state = __risc_v_disable_irq();
+            typeBufSize packet_len = Ep1DataOUTLen;
+            typeBufSize accepted_len = packet_len;
+            write_buf( pUsbBuf, Ep1OUTDataBuf, &accepted_len );
+            if( accepted_len == packet_len )
+            {
+                Ep1DataOUTFlag = 0;
+                VENSer0SendFlag = 0;
+                R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
+            }
+            __risc_v_enable_irq( irq_state );
+        }
         if( (R8_UEP2_CTRL&MASK_UEP_T_RES) == UEP_T_RES_NAK )
         {
             len  = MAX_PACKET_SIZE/2;
@@ -2038,11 +2203,7 @@ uint8_t USB_RxQuery( void *buf, typeBufSize *len )
             return 0x80;
         }
     }
-#if ( USB_WORK_MODE== USB_CDC_MODE )
     if( pUsbBuf && pUsbBuf->data_len )
-#else
-    if( gEnd2DataLen )
-#endif
     {
 
         HostLedActivity();
@@ -2059,18 +2220,9 @@ uint8_t USB_RxQuery( void *buf, typeBufSize *len )
             return 0xFF;
         }
         *len = max_len;
-        typeBufSize remain_len = read_buf( pUsbBuf,buf,len  );
-#if ( USB_WORK_MODE== USB_VENDOR_MODE )
-        gEnd2DataLen = remain_len;
-        if( gEnd2DataLen < (USB_BUF_LEN-MAX_PACKET_SIZE) )
-        {
-            PFIC_DisableIRQ(USB_IRQn);
-            R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_R_RES)|UEP_R_RES_ACK; //OUT_ACK
-            PFIC_EnableIRQ(USB_IRQn);
-        }
-#else
-        (void)remain_len;
-#endif
+        read_buf( pUsbBuf, buf, len );
+        /* OUT stays NAKed while its retained packet is pending. The main
+         * loop commits that packet and restores ACK; no length mirror. */
         return 0x0;
     }
     *len = 0;
@@ -2091,9 +2243,12 @@ void USB_Init( void )
     // 关闭仿真调试接口
     R16_PIN_ALTERNATE &= ~RB_PIN_DEBUG_EN;
     InitUSBDevPara();
+    /* The USB init routine enables USB_IRQ and the pull-up before returning.
+     * Create the software buffer first so an immediately arriving OUT packet
+     * can never dereference a NULL pUsbBuf during enumeration/open. */
+    usb_buffer_create(&pUsbBuf);
     InitUSBDevice();
     PFIC_EnableIRQ( USB_IRQn );
-    usb_buffer_create(&pUsbBuf);
 }
 
 void USB_DeviceDisable( void )

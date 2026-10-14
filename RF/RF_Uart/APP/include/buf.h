@@ -40,6 +40,9 @@ struct simple_buf {
 struct simple_buf *simple_buf_create(struct simple_buf *buf, 
             uint8_t *buf_pool, uint16_t pool_size);
 
+/* Discard queued bytes and return the ring to its empty state. */
+void simple_buf_reset(struct simple_buf *buf);
+
 /**
  * @brief Prepare data to be added at the end of the buffer
  *

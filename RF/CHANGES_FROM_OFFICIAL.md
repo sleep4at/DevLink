@@ -16,9 +16,31 @@
 
 ### Linux USB 现场检查与修复
 
-本机现场检查确认：板上当前运行的旧 CDC 固件枚举为 `1a86:8040`，绑定 `cdc_acm` 并创建 `/dev/ttyACM0`。实际打开该节点时，内核日志出现 USB reset，约 6 秒后 USB disconnect，再重新枚举；因此此前“反复打开才偶尔成功”的现象来自固件 CDC 控制传输不稳定，不是权限或串口助手占用。
+现场排查区分出两类问题：旧 CDC 固件曾在打开端口时触发 USB reset/disconnect；此外，Linux 主机的 USB 自动挂起也会使当前 Host USB 设备进入 runtime suspend，恢复不稳定时表现为串口打开等待约 5 秒并报输入/输出错误。后者通过关闭该设备的自动挂起解决，不是单靠修改固件即可消除的问题。
 
 当前默认构建已切回官方原有 CH341 兼容 Vendor 模式：设备描述符为 `1a86:7523`，数据端点使用 CH341 的 32 字节 bulk OUT/IN，控制请求实现保留 CH341 的 `0x5f/0x9a/0x95/0xa1/0xa4/0xb2` 集合。USB 事件队列现扩为 32 项，并为 EP0 SETUP/控制 OUT 保存事件快照；EP0 SETUP 现在在 USB 中断中立即处理，避免 Linux 控制传输等待前台循环导致约 5 秒超时；主循环继续排空数据事件。对 Linux 可能查询的未知字符串索引（如 `0xEE`）保持标准 STALL，并在下一个 SETUP 到来时清除 STALL、复位 EP0 数据 toggle；没有加入 Microsoft OS 专用描述符。Vendor 模式是当前推荐配置，实际首次枚举和打开端口的稳定性应以刷入当前 HEX 后的 `dmesg` 日志为准。
+
+#### Linux 禁用该设备的 USB 自动挂起
+
+如果设备可以枚举，但打开 `/dev/ttyUSB*` 时等待数秒、报输入/输出错误，且 `power/runtime_status` 显示 `suspended`，应检查 Linux USB runtime power management。确认 VID:PID 为 `1a86:7523` 后，可添加 udev 规则，让该 Host 设备保持唤醒：
+
+```udev
+# /etc/udev/rules.d/99-ch570-dongle-no-autosuspend.rules
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", TEST=="power/control", ATTR{power/control}="on"
+```
+
+保存后重新加载规则并重新插拔设备：
+
+```sh
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=usb
+```
+
+检查设备对应的 sysfs 路径（例如 `/sys/bus/usb/devices/3-2`）：`power/control` 应为 `on`，`power/runtime_status` 通常应为 `active`。设备号和路径会随 USB 拓扑、插拔而变化，不要把示例路径写死。
+
+如果系统安装并启用了 TLP，还应将该设备加入 TLP 的 USB 自动挂起黑名单/拒绝列表，避免 TLP 再次将其设为自动挂起。保留已有配置，并在 `USB_DENYLIST` 中追加 `1a86:7523`，然后重启 TLP；可用 `tlp-stat -u` 检查结果。TLP 不同版本的配置项名称可能不同，应以本机 `/etc/tlp.conf` 注释和 `tlp-stat` 输出为准。
+
+这是 Linux 主机侧电源管理配置，不会改动 Windows 兼容代码或 USB 描述符。固件中的 Linux Vendor/CH341 控制请求处理与此为不同层面的修复；避免设备被自动挂起后无法可靠恢复，才能消除本机复现的首次打开延迟和 I/O 错误。
 
 ## 变化摘要
 

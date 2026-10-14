@@ -131,8 +131,8 @@ typedef struct
 {
     uint8_t TxBuf[BUF_LEN_TX];
     typeBufSize len;
-    uint8_t status;
-    uint8_t resendCount;
+    volatile uint8_t status;
+    volatile uint8_t resendCount;
 } rfTxBuf_t;
 
 typedef struct  __attribute__((packed))
@@ -210,6 +210,8 @@ typedef struct
 /* Host status response request: Device shall generate the BOOT/RESET pulse. */
 #define  RF_CTRL_ENTER_BOOT    0x01u
 #define  RF_CREDIT_UNIT        16u
+#define  RF_CREDIT_VALID       0x80u
+#define  RF_STATUS_CREDIT_MASK 0x7Eu
 
 void rf_tx_set_frequency( uint32_t f );
 void rf_tx_set_sync_word( uint32_t sync_word );

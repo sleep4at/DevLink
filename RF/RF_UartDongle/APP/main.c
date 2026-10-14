@@ -256,7 +256,6 @@ static void HostLedTask( void )
  * GLOBAL TYPEDEFS
  */
 __attribute__((used))
-__HIGH_CODE
 void process_main( void )
 {
     while(1)
