@@ -48,19 +48,19 @@ sudo udevadm trigger --subsystem-match=usb
 
 - Device 的 BOOT 引脚由 PA3 调整为 PA7，LED 由 PA7 调整为 PA3；Host 的 LED 由 PA7 调整为 PA3。
 - Device/Host 的 LED 驱动改为适配双 LED 接法，并增加连接状态指示。
-- Host 增加 PA2 接地触发的远端下载 GPIO 中断输入，以及 PA7 接地触发的本机 Bootloader GPIO 中断；分立固件不再使用 PA7 角色切换。
-- Device 增加 PA7 接地触发的本机 Bootloader 按键：下降沿中断只记录请求，主循环去抖后按 CH570 ROM 规定的软件复位条件进入本机 ROM Bootloader；目标 MCU 的远端 BOOT/RESET 脉冲路径保持独立。
-- Host 增加 PA7 接地触发的本机 Bootloader 按键；PA2 仍只负责向远端 Device 请求下载。进入 ROM ISP 前先在普通任务中关闭应用 USB、复位 USB SIE/FIFO、停止 USB IRQ/DMA 并移除 D+ 上拉，再由 RAM 中的函数擦除 `0x0000` 起始的 4 KiB boot stub 并执行 WCH 软件复位序列。
+- Host 的远端下载按键改为 PA7 接地触发，本机 Bootloader 按键改为 PA2 接地触发；两个按键均由 GPIO 中断捕获，分立固件不再使用 PA7 角色切换。
+- Device 本机 Bootloader 按键由 PA7 改到 PA2（接地触发）；PA2 同时连接目标 MCU NRST，按键按下时目标 MCU 会保持复位。PA7 空闲时为无上拉高阻，由板上 NMOS 栅极下拉保持关闭，仅在远端 BOOT/RESET 时序中临时驱动。按键中断只记录请求，长按确认和 ROM ISP 入口仍在主循环执行。
+- Host 的本机 Bootloader 按键使用 PA2；PA7 接地触发后请求远端 Device 下载。Host 进入 ROM ISP 前先在普通任务中关闭应用 USB、复位 USB SIE/FIFO、停止 USB IRQ/DMA 并移除 D+ 上拉，再由 RAM 中的函数擦除 `0x0000` 起始的 4 KiB boot stub 并执行 WCH 软件复位序列。
 - Host RF 缓冲区由官方 512 B 调整为 1024 B（此前曾为 1536 B）；Device 3 KiB UART 缓冲区和 512 B RF 缓冲区保持不变。
 - USB 取数接口改为遵守调用方给出的最大长度。
 - Host Vendor USB 不再在 USB 中断路径逐包打印整包十六进制数据，避免双向 30 ms 测试时阻塞 CH341 控制请求并触发 Linux `-110` 超时。
 - Host USB 默认使用原厂商 CH341 兼容 Vendor 接口（`1a86:7523`），由 Linux 原生 `ch341` 驱动承载；CDC 实现保留为可选实验模式，但不作为当前推荐固件。
-- Device 和 Host LED 改用启动时初始化的自由运行 SysTick 计数器，不再读取未初始化的计数器。
+- Host LED 使用启动时初始化的自由运行 SysTick；Device 的 LED、按键长按及 BOOT/RESET 延时使用启动时校准的 LSI/RTC 计数，避免 UART 配置切换系统主频后时间间隔变化。
 - 连接后的 LED 仍显示角色状态；USB 或 RF 有效数据会触发约 50 ms 的另一只 LED 活动脉冲，随后自动恢复角色灯，不在 USB/RF 中断中直接改 GPIO。
 
 ### 新增的功能
 
-- Host PA2 按键触发远端 Device 的 BOOT/RESET 下载时序。
+- Host PA7 按键触发远端 Device 的 BOOT/RESET 下载时序。
 - Linux 可直接使用 `/dev/ttyUSB*` 的 CH341 兼容接口，不依赖额外自定义上位机协议。
 - 使用 RF 包头原有 resv 字段传递 16 B 单位的缓冲区额度。
 - Host 缓冲区不足时拒绝确认，依靠 Device 原序号重传恢复数据。
@@ -71,7 +71,7 @@ sudo udevadm trigger --subsystem-match=usb
 - 避免 Host 缓冲区溢出后仍发送 ACK 所造成的静默丢包。
 - 避免 ACK 中的 USB 数据再次超过 Device 可用缓冲区。
 - 将毫秒级 BOOT/RESET 脉冲从 RF 中断回调移到主循环，降低中断阻塞风险。
-- 修正未连接 LED 不闪烁：初始化自由运行计数器，并按当前系统主频换算半秒间隔。
+- 修正未连接 LED 不闪烁：Host 初始化自由运行 SysTick，Device 初始化并校准 LSI/RTC，并按对应时基换算闪烁间隔。
 - 修正连接后活动指示被角色灯任务覆盖的问题：活动状态由 RF/USB 数据路径置位，主循环统一输出活动窗口。
 - Host 对“Device→Host”数据只在 RF 包接收时置位一次活动标志，避免 RF 接收和 USB 读出各翻转一次而相互抵消。
 - 保持空口包格式和单包长度不变，正常传输不增加 RF 字节开销。
@@ -94,8 +94,8 @@ Device 的 PA3 按用户双 LED 接法使用：输出低电平点亮低有效 LE
 | 功能 | 官方原工程 | 当前修改工程 |
 |---|---|---|
 | LED | PA7 | 改为 PA3 |
-| 远端下载按键 | 无 | PA2，上拉输入，接地下降沿触发 |
-| PA7 | 原本用于 LED | 本机 Bootloader 按键，上拉输入、下降沿中断 |
+| 远端下载按键 | 无 | PA7，上拉输入，接地下降沿触发 |
+| 本机 Bootloader 按键 | 原本用于 LED | PA2，上拉输入、下降沿中断 |
 
 Host 的 PA3 使用输出高电平点亮另一只 LED；浮空时两只 LED 都熄灭。Host 和 Device 都采用“未连接约 1 Hz 闪烁、连接后角色灯常亮、传输时短暂切换另一只 LED”的状态指示。
 
@@ -103,19 +103,19 @@ Host 的 PA3 使用输出高电平点亮另一只 LED；浮空时两只 LED 都�
 
 官方 Device 代码已经支持接收目标 MCU 的下载同步字节 0x7F，但当前工程做了以下调整：
 
-1. Host 的 PA2 按键由 GPIOA 中断捕获，按下后置位请求标志。
+1. Host 的 PA7 按键由 GPIOA 中断捕获，按下后置位远端下载请求标志。
 2. Host 在下一个 RF 状态响应的 resv 控制位中发送 RF_CTRL_ENTER_BOOT。
 3. Device 收到控制位后，在主循环而不是 RF 中断回调中执行 BOOT/RESET 时序。
-4. Device 将 BOOT、RESET 临时配置为推挽输出，执行：BOOT/RESET 初始高电平、RESET 拉低、RESET 拉高、BOOT 拉低，然后恢复到高阻/上拉空闲状态。
-5. 脉冲完成后，Device 向目标 MCU UART 发送 0x7F，保持 ISP 同步顺序。
+4. Device 使用非阻塞状态机：PA7（BOOT 控制）输出高 50 ms；随后 PA2（NRST）拉低 50 ms；释放 PA2 后继续保持 PA7 高 100 ms；最后 PA7 改为无上拉高阻，不主动拉低。三个时长可在 `RF_Uart/APP/include/uart.h` 通过 `DEVICE_TARGET_BOOT_SETUP_MS`、`DEVICE_TARGET_RESET_LOW_MS`、`DEVICE_TARGET_BOOT_HOLD_MS` 配置。状态机使用启动时校准的 LSI/RTC 计数，避免 UART 配置引发的系统主频切换改变脉冲时长。
+5. 若当前请求要求 STM32 同步，状态机完成并释放 PA7 后，Device 向目标 MCU UART 发送 `0x7F`。
 
 把脉冲从 RF 回调移到主循环，避免在无线中断上下文中执行毫秒级延时。当前实现假定板上 BOOT 选择电路使“高电平有效”，目标 MCU 的具体有效电平由硬件开关和外围电路保证。
 
 ### Device 本机 Bootloader 按键
 
-Device PA7 空闲时为上拉输入和下降沿中断。中断只记录按下时刻；主循环去抖并要求持续按住 3 秒，PA3 快速闪烁提示确认后，松开才执行危险操作，短按会取消。入口检查 `R8_GLOB_CFG_INFO & RB_CFG_BOOT_EN`，随后在 `__HIGH_CODE` 中反复尝试擦除 `0x0000` 起始的一个 4 KiB 块，执行 `FLASH_ROM_SW_RESET()` 和 WCH 安全访问/软件复位序列，让 ROM ISP 接管。当前工程 `_start` 位于 `0x0000`，故擦除会破坏启动代码；ROM Bootloader 必须启用，恢复时须烧录包含 `0x0000` 启动内容的完整 HEX。进入前 PA2/PA7 被恢复为输入状态，不会产生远端 MCU 下载脉冲。
+Device 本机自引导按键现使用 PA2（上拉输入、下降沿中断）；该脚同时接目标 MCU NRST，按键按下会使目标 MCU 复位。中断只记录按下时刻，主循环处理去抖和确认。为降低探头毛刺或误操作擦除风险，改为两步确认：第一次按住 3 秒后 PA3 开始双闪并进入 5 秒确认窗口，松开不会擦除；窗口内第二次按住 1 秒后 PA3 快闪，松开才执行擦除。短按、第二次按住不足 1 秒或确认窗口超时均取消，设备继续运行。擦除入口检查 `R8_GLOB_CFG_INFO & RB_CFG_BOOT_EN`，随后在 `__HIGH_CODE` 中反复尝试擦除 `0x0000` 起始的一个 4 KiB 块，执行 `FLASH_ROM_SW_RESET()` 和 WCH 安全访问/软件复位序列，让 ROM ISP 接管。当前工程 `_start` 位于 `0x0000`，故擦除会破坏启动代码；ROM Bootloader 必须启用，恢复时须烧录包含 `0x0000` 启动内容的完整 HEX。PA7 空闲时为无上拉高阻，依靠外部 NMOS 栅极下拉保持关闭；仅远端 BOOT/RESET 时序会临时驱动 PA2/PA7。若本机按键已按下，远端脉冲延后，避免复位输出与按键接地冲突。
 
-Host PA7 与 Device 一样采用“擦除 boot stub 后复位”的 ISP 流程。Host 仍保留 `0x0000` 的 4 字节 boot stub 和 `0x2000` 应用布局；PA7 长按确认后关闭应用 USB，随后在 `__HIGH_CODE` 中反复擦除 `0x0000` 起始的一个 4 KiB 块，执行 `FLASH_ROM_SW_RESET()` 和 WCH 安全访问/软件复位序列，让 ROM ISP 接管。应用主体位于 `0x2000`，不会被这次擦除影响；恢复运行时必须烧录包含 `0x0000` boot stub 的完整 HEX。Host 的 USB 会断开，随后由 CH570 ROM Bootloader 重新枚举为 `1a86:55e0`。PA2 的远端下载按键逻辑保持不变。
+Host PA2 与 Device 一样采用“擦除 boot stub 后复位”的 ISP 流程。Host 仍保留 `0x0000` 的 4 字节 boot stub 和 `0x2000` 应用布局；PA2 长按确认后关闭应用 USB，随后在 `__HIGH_CODE` 中反复擦除 `0x0000` 起始的一个 4 KiB 块，执行 `FLASH_ROM_SW_RESET()` 和 WCH 安全访问/软件复位序列，让 ROM ISP 接管。应用主体位于 `0x2000`，不会被这次擦除影响；恢复运行时必须烧录包含 `0x0000` boot stub 的完整 HEX。Host 的 USB 会断开，随后由 CH570 ROM Bootloader 重新枚举为 `1a86:55e0`。PA7 的远端下载请求逻辑保持不变。
 
 ROM ISP 的等待窗口由芯片内部 Bootloader 决定，当前工程没有可配置的 10 秒常量；未收到烧录通信时通常约 10 秒后自动退出并断开 USB。
 
@@ -181,7 +181,7 @@ Host RF 缓冲区增大只提高突发缓存能力，不改变 RF 单包最大�
 
 两个单角色工程已通过 clean build：
 
-- Device：长按擦除启动块的入口版本 RAM 为 11672 / 12288 B，静态区末端到栈顶约 616 B；PA7 要按住 3 秒并等待 PA3 快速闪烁，松开后才擦除地址 0 起始的 4 KiB 并复位。当前固件从地址 0 启动，需使用完整 HEX 恢复。`RF_UartTxInit()` 已移出 `.highcode`，仅在启动时从 Flash 执行，以回收 RAM 执行区。
-- Host：当前 boot-stub 擦除入口版本 RAM 为 11176 / 12288 B，静态区末端到栈顶约 1112 B；PA7 长按确认后擦除 `0x0000` 起始的 4 KiB boot stub，再执行软件复位进入 ROM ISP。Host 应用链接在 `0x2000`，恢复运行必须烧录包含 `0x0000` boot stub 的完整 HEX。
+- Device：长按擦除启动块的入口版本 RAM 为 11672 / 12288 B，静态区末端到栈顶约 616 B；PA2 要按住 3 秒并等待 PA3 快速闪烁，松开后才擦除地址 0 起始的 4 KiB 并复位。当前固件从地址 0 启动，需使用完整 HEX 恢复。`RF_UartTxInit()` 已移出 `.highcode`，仅在启动时从 Flash 执行，以回收 RAM 执行区。
+- Host：当前 boot-stub 擦除入口版本 RAM 为 11176 / 12288 B，静态区末端到栈顶约 1112 B；PA2 长按确认后擦除 `0x0000` 起始的 4 KiB boot stub，再执行软件复位进入 ROM ISP。Host 应用链接在 `0x2000`，恢复运行必须烧录包含 `0x0000` boot stub 的完整 HEX。
 
 代码层面已检查包长度、额度边界和 ACK/重传路径；尚未替代真实硬件测试。正式用于 200 KB 烧录前，仍应验证 BOOT/RESET 波形、按键触发、RF 干扰下的重传，以及 gRfResendFailCount == 0 和最终固件校验结果。

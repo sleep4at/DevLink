@@ -319,8 +319,11 @@ void UART_Init(void)
     GPIOA_SetBits( (DTR_PIN|RTS_PIN) );
     GPIOA_ModeCfg( (DTR_PIN|RTS_PIN), GPIO_ModeOut_PP_5mA);
 #else
-    GPIOA_SetBits( (RESET_PIN|BOOT_PIN) );
-    GPIOA_ModeCfg( (RESET_PIN|BOOT_PIN), GPIO_ModeOut_PP_5mA);
+    /* Device idle state: PA2 is the pulled-up local key/target NRST input;
+     * PA7 stays high-Z so it cannot enable the external BOOT NMOS branch.
+     * The remote-boot task temporarily drives both pins when requested. */
+    GPIOA_ModeCfg( RESET_PIN, GPIO_ModeIN_PU );
+    GPIOA_ModeCfg( BOOT_PIN, GPIO_ModeIN_Floating );
 
 #endif
 

@@ -397,7 +397,7 @@ static void rfProcessRx( rfPackage_t *pPkt )
                         pPkt_t->seq = gDataSeq;
                     }
                 }
-                /* Carry the PA2 key event in the status response. */
+                /* Carry the PA7 remote-download key event in the status response. */
                 pPkt_t->resv |= Host_BootRequestTake() ? RF_CTRL_ENTER_BOOT : 0;
                 gLastStatusRspSeq = gDataSeq;
                 gLastStatusRspValid = 1;

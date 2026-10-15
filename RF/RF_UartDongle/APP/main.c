@@ -40,8 +40,8 @@ void HostLedActivity( void )
     s_host_led_until = SYS_GetSysTickCnt() + GetSysClock() / 20u;
 }
 
-/* PA2 is the remote-download request key; PA7 enters this CH570's ROM
- * Bootloader.  Both keys are active-low and are handled from the main loop. */
+/* PA7 is the remote-download request key; PA2 enters this CH570's ROM
+ * Bootloader. Both keys are active-low and handled from the main loop. */
 static volatile uint8_t s_boot_request;
 static volatile uint8_t s_self_boot_request;
 static volatile uint32_t s_self_boot_edge_tick;
@@ -52,14 +52,14 @@ static volatile uint32_t s_self_boot_edge_tick;
 __INTERRUPT __HIGH_CODE
 void GPIOA_IRQHandler( void )
 {
-    if( GPIOA_ReadITFlagBit( GPIO_Pin_2 ) )
-    {
-        GPIOA_ClearITFlagBit( GPIO_Pin_2 );
-        s_boot_request = 1;
-    }
     if( GPIOA_ReadITFlagBit( GPIO_Pin_7 ) )
     {
         GPIOA_ClearITFlagBit( GPIO_Pin_7 );
+        s_boot_request = 1;
+    }
+    if( GPIOA_ReadITFlagBit( GPIO_Pin_2 ) )
+    {
+        GPIOA_ClearITFlagBit( GPIO_Pin_2 );
         /* Ignore bounce/retrigger edges while a press is already being
          * debounced or is waiting for the release confirmation. */
         if( s_self_boot_request == 0 )
@@ -83,10 +83,10 @@ static void HostIo_Init( void )
     s_boot_request = 0;
     s_self_boot_request = 0;
     s_self_boot_edge_tick = 0;
-    GPIOA_ModeCfg( GPIO_Pin_2, GPIO_ModeIN_PU );
-    GPIOA_ITModeCfg( GPIO_Pin_2, GPIO_ITMode_FallEdge );
     GPIOA_ModeCfg( GPIO_Pin_7, GPIO_ModeIN_PU );
     GPIOA_ITModeCfg( GPIO_Pin_7, GPIO_ITMode_FallEdge );
+    GPIOA_ModeCfg( GPIO_Pin_2, GPIO_ModeIN_PU );
+    GPIOA_ITModeCfg( GPIO_Pin_2, GPIO_ITMode_FallEdge );
     GPIOA_ClearITFlagBit( GPIO_Pin_2 | GPIO_Pin_7 );
     GPIOA_ModeCfg( LED_PIN, GPIO_ModeIN_Floating );
     PFIC_EnableIRQ( GPIO_A_IRQn );
@@ -110,7 +110,7 @@ static void Host_EnterRomBootloader( void )
     __risc_v_disable_irq();
 
     /* Release the key before erasing and leave it passive for ROM startup. */
-    GPIOA_ModeCfg( GPIO_Pin_7, GPIO_ModeIN_PU );
+    GPIOA_ModeCfg( GPIO_Pin_2, GPIO_ModeIN_PU );
 
     /* Erase exactly one 4-KiB Flash block.  This is the block containing
      * boot_stub.S; the application is linked at 0x2000 and is not erased. */
@@ -134,7 +134,7 @@ static void Host_EnterRomBootloader( void )
     }
 }
 
-/* PA7 must be held for 3 seconds, then released to confirm ISP entry. The
+/* PA2 must be held for 3 seconds, then released to confirm ISP entry. The
  * GPIO IRQ only timestamps the press; timing and hand-off run in main. */
 static void Host_SelfBootTask( void )
 {
@@ -155,7 +155,7 @@ static void Host_SelfBootTask( void )
         {
             return;
         }
-        if( GPIOA_ReadPortPin( GPIO_Pin_7 ) )
+        if( GPIOA_ReadPortPin( GPIO_Pin_2 ) )
         {
             s_self_boot_request = 0;
             return;
@@ -169,7 +169,7 @@ static void Host_SelfBootTask( void )
 
     if( s_self_boot_request == 2 )
     {
-        if( !GPIOA_ReadPortPin( GPIO_Pin_7 ) )
+        if( !GPIOA_ReadPortPin( GPIO_Pin_2 ) )
         {
             if( (uint32_t)(now - s_self_boot_edge_tick) < hold_ticks )
             {
@@ -187,7 +187,7 @@ static void Host_SelfBootTask( void )
             return;
         }
     }
-    else if( s_self_boot_request == 3 && !GPIOA_ReadPortPin( GPIO_Pin_7 ) )
+    else if( s_self_boot_request == 3 && !GPIOA_ReadPortPin( GPIO_Pin_2 ) )
     {
         return;
     }

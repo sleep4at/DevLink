@@ -27,8 +27,8 @@
  * @brief   DTR/RTS¹¦ÄÜÓëSTÒ»¼üÏÂÔØ¹¦ÄÜ
  * @note    Ä¬ÈÏ¿ªÆôSTÒ»¼üÏÂÔØ¹¦ÄÜÇÒ¹Ø±ÕDTR/RTS¹¦ÄÜ£»
  *          ÈçÐè¿ªÆôDTR/RTS¹¦ÄÜ£¬½«DTR_RTS_FUNCÖÃ1¼´¿É£»
- *          DTR / RESET_PIN     PA2
- *          RTS / BOOT_PIN      PA7
+ *          Device mode: PA2 is target NRST/local self-boot key;
+ *          PA7 is target BOOT and remains high-Z while idle.
  */
 
  
@@ -42,6 +42,18 @@
 #else
 #define    RESET_PIN      (1<<2)
 #define    BOOT_PIN       (1<<7)
+#endif
+
+/* Target download timing, in milliseconds. Tune these for the target MCU and
+ * the board-level BOOT polarity circuit. */
+#ifndef DEVICE_TARGET_BOOT_SETUP_MS
+#define DEVICE_TARGET_BOOT_SETUP_MS       50u
+#endif
+#ifndef DEVICE_TARGET_RESET_LOW_MS
+#define DEVICE_TARGET_RESET_LOW_MS        50u
+#endif
+#ifndef DEVICE_TARGET_BOOT_HOLD_MS
+#define DEVICE_TARGET_BOOT_HOLD_MS       100u
 #endif
 
 

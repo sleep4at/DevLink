@@ -24,6 +24,11 @@ static void AppTimebaseInit( void )
     SysTick->CMP = 0xFFFFFFFFu;
     SysTick->SR = SysTick_SR_CNTIF;
     SysTick->CTLR = SysTick_CTLR_STCLK | SysTick_CTLR_STE;
+
+    /* Calibrate the independent LSI/RTC counter. Target BOOT/RESET timing
+     * uses this clock so UART-driven SYSCLK changes cannot stretch pulses. */
+    LClk_Cfg( ENABLE );
+    RTC_InitClock( Count_2047 );
 }
 
 
