@@ -9,7 +9,6 @@
   <img src="https://img.shields.io/badge/Link-2.4%20GHz-5B8C5A?style=flat-square" alt="2.4 GHz RF">
   <img src="https://img.shields.io/badge/Transport-USB%20%2B%20UART-7353BA?style=flat-square" alt="USB and UART">
   <img src="https://img.shields.io/badge/Firmware-Host%20%2B%20Device-44546A?style=flat-square" alt="Host and Device firmware">
-  <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="GPL-3.0 License">
 </p>
 
 DevLink使用两颗WCH CH570Q搭建无线串口链路：
