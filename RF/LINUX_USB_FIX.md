@@ -1,7 +1,7 @@
 # Linux USB 适配改动说明
 
 本文只记录相对于官方工程
-`CH570无线串口-3v1/RF/RF_UartDongle/APP/usb_uart.c`
+`RF/Host/APP/usb_uart.c`
 的 Linux USB 枚举稳定性改动。
 
 ## 结论
@@ -9,7 +9,7 @@
 针对 Linux 的 USB/CH341 适配，必需修改的文件只有：
 
 ```text
-RF/RF_UartDongle/APP/usb_uart.c
+RF/Host/APP/usb_uart.c
 ```
 
 `APP/include/usb_uart.h` 在修改版中还声明了 `USB_DeviceDisable()`，但该接口只服务于 Host 的 PA7 自启动 ISP，不属于 Linux USB 枚举修复；`LED_PIN` 和 `HostLedActivity()` 也属于应用层改动。单独移植下面的 Linux USB 修复逻辑时，不需要为了枚举稳定性修改该头文件；若同时启用 Host PA7 自启动功能，则需要保留 `USB_DeviceDisable()` 声明。
@@ -29,7 +29,7 @@ Linux 内核 ch341 驱动
 
 现场遇到的“Host 已枚举，但首次打开 `/dev/ttyUSB*` 等待约 5 秒后报输入/输出错误”还可能由 Linux USB runtime autosuspend 引起。设备进入 `suspended` 后，当前 CH570 USB 固件/外设在该环境下不能可靠地从系统挂起状态恢复。通过 udev 将该 VID:PID 的 `power/control` 固定为 `on`，并在启用 TLP 时将设备加入其 USB 自动挂起黑名单/拒绝列表后，串口打开恢复正常。该处理是主机系统配置，不属于 `usb_uart.c` 的固件移植项，也不应改动 Windows 兼容路径。
 
-创建 `/etc/udev/rules.d/99-ch570-dongle-no-autosuspend.rules`：
+创建 `/etc/udev/rules.d/99-ch570-host-no-autosuspend.rules`：
 
 ```udev
 ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", TEST=="power/control", ATTR{power/control}="on"
@@ -48,7 +48,7 @@ sudo udevadm trigger --subsystem-match=usb
 
 ## 修改位置
 
-下列位置按当前 `RF/RF_UartDongle/APP/usb_uart.c` 的符号名说明，不依赖固定行号。当前文件还包含 USB OUT 保留/反压、断总线清理等可靠性改动；不要把旧版文档中的片段直接贴入官方代码，移植时需按完整控制流整合。
+下列位置按当前 `RF/Host/APP/usb_uart.c` 的符号名说明，不依赖固定行号。当前文件还包含 USB OUT 保留/反压、断总线清理等可靠性改动；不要把旧版文档中的片段直接贴入官方代码，移植时需按完整控制流整合。
 
 ### 1. EP0 快照与事件槽位
 
@@ -107,12 +107,12 @@ Vendor EP1 OUT 兼容路径也会保留一包并在前台整包提交后 ACK。C
 以下修改不要为了测试 Linux 枚举而一起移植：
 
 ```text
-RF_UartDongle/APP/main.c
+RF/Host/APP/main.c
   - Host LED 活动指示
   - PA2 按键中断
   - SysTick 活动计时
 
-RF_UartDongle/APP/rf_uart_rx.c
+RF/Host/APP/rf_uart_rx.c
   - RF credit/反压
   - RF 重传和缓冲区处理
   - RF_RxService()

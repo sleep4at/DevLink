@@ -2,16 +2,16 @@
 
 当前拆分为两个互斥的固件：
 
-- `RF_Uart`：Device 固件，连接目标 MCU。PA0/PA1 为目标 UART；PA2 同时接目标 NRST 和本机自引导按键（按键接地触发）；PA7 为目标 BOOT 控制，空闲时高阻，仅远端下载时驱动；PA3 为双 LED 状态输出。目标 UART 环形缓冲区保持 3 KiB。
-- `RF_UartDongle`：Host 固件，连接 USB。PA7 为接地触发的远端 Device 下载请求键，PA2 为接地触发的本机 Bootloader 键，PA3 为双 LED 状态输出。Host RF 接收环形缓冲区为 1 KiB。
+- `Device/Device.wvproj`：Device 固件，连接目标 MCU。PA0/PA1 为目标 UART；PA2 同时接目标 NRST 和本机自引导按键（按键接地触发）；PA7 为目标 BOOT 控制，空闲时高阻，仅远端下载时驱动；PA3 为双 LED 状态输出。目标 UART 环形缓冲区保持 3 KiB。
+- `Host/Host.wvproj`：Host 固件，连接 USB。PA7 为接地触发的远端 Device 下载请求键，PA2 为接地触发的本机 Bootloader 键，PA3 为双 LED 状态输出。Host RF 接收环形缓冲区为 1 KiB。
 
 两份固件不再保存或切换运行角色，因此不会同时编译/运行 USB 和目标 UART 两套业务路径。Host 的 PA7 请求通过状态响应的 `resv` 控制位传给 Device；需要 STM32 同步字节的路径会在下载控制完成后向目标 UART 发送 `0x7F`。Device 的 BOOT/RESET 时序由主循环中的非阻塞状态机执行：PA7 输出高 50 ms，随后 PA2 拉低 50 ms；释放 PA2 后继续保持 PA7 高 100 ms，最后 PA7 改为无上拉高阻，不主动拉低。时序计数使用启动时校准的 LSI/RTC 计数，不随 UART 配置引发的 24/100 MHz 系统时钟切换而改变。
 
-Device 的本机自引导按键改为 PA2，配置为上拉输入和下降沿中断；该脚也接目标 NRST，因此按键按下期间会复位目标 MCU。为降低探头毛刺或误操作清除应用的风险，Device 使用两步确认：第一次按住 3 秒后 PA3 开始双闪，进入 5 秒确认窗口；松开第一次按键不会擦除。窗口内再按住 1 秒，PA3 快闪后松开，才执行擦除。确认窗口超时、短按或第二次按住不足 1 秒都会取消，设备继续运行。擦除入口在 `__HIGH_CODE` 中擦除 `0x0000` 起始的一个 4 KiB 块，随后执行 FlashROM 复位准备和系统软件复位，以便 ROM ISP 接管。**这是破坏性入口**：当前 Device 镜像从 `0x0000` 启动，擦除会破坏启动代码；Bootloader 必须启用，恢复时须烧录包含 `0x0000` 启动内容的完整 HEX。PA7 空闲时为无上拉高阻，依靠板上 NMOS 栅极下拉保持关闭；远端下载时才临时驱动 PA2/PA7。若本机长按键已按下，远端复位脉冲会延后，避免复位输出与按键接地冲突。
+Device 的本机自引导按键改为 PA2，配置为上拉输入和下降沿中断；该脚也接目标 NRST，因此按键按下期间会复位目标 MCU。为降低探头毛刺或误操作清除应用的风险，Device 使用两步确认：第一次按住 3 秒后 PA3 开始双闪，进入 5 秒确认窗口；松开第一次按键不会擦除。窗口内再按住 1 秒，PA3 快闪后松开，才执行擦除。确认窗口超时、短按或第二次按住不足 1 秒都会取消，设备继续运行。擦除前会停止 PA0/PA1 目标 UART、关闭其 IRQ/超时定时器并将引脚释放为浮空输入；随后擦除 `0x0000` 起始的一个 4 KiB 块并执行 FlashROM/系统软件复位序列，以便 ROM ISP 接管。Device 与 Host 使用相同布局：`0x0000` 放 4 字节 boot stub，应用从 `0x2000` 开始，因此擦除 boot stub 不会擦到应用主体。Bootloader 必须启用，恢复时须烧录包含 boot stub 的完整 HEX。PA7 空闲时为无上拉高阻，依靠板上 NMOS 栅极下拉保持关闭；远端下载时才临时驱动 PA2/PA7。若本机长按键已按下，远端复位脉冲会延后，避免复位输出与按键接地冲突。
 
-Host 的 PA2 使用相同的按下确认、25 ms 去抖和松开复位流程；复位前先在普通任务中关闭应用 USB，并按参考工程等待约 20 ms，再由 RAM 中的函数擦除 stub 并复位，Host USB 由 ROM Bootloader 重新枚举。PA7 用于请求远端 Device 进入下载模式。
+Host 的 PA2 本机自引导与 Device 采用相同的两步确认：首次按住 3 秒后 PA3 在两颗 LED 间交替闪烁并开启 5 秒窗口；窗口内再次按住 1 秒后只闪 Host 角色灯（高电平/高阻），松开才进入 ISP。确认成功后先关闭应用 USB并等待约 20 ms，再由 RAM 中的函数擦除 stub 并复位，Host USB 由 ROM Bootloader 重新枚举。PA7 用于请求远端 Device 进入下载模式。
 
-Host 的链接布局为：`0x0000` 放置 4 字节 `boot_stub.S` 跳转，应用从 `0x2000` 开始；Host 自启动 ISP 时只擦除 `0x0000` 起始的 4 KiB。Device 没有独立 boot stub，应用从 `0x0000` 启动，同样通过擦除首个 4 KiB 后复位进入 ROM ISP。两种入口都是破坏性操作，ISP 超时后必须重新烧录完整 HEX 才能恢复应用。
+Host 和 Device 的链接布局一致：`0x0000` 放置 4 字节 `boot_stub.S` 跳转，应用从 `0x2000` 开始；自启动 ISP 时擦除 `0x0000` 起始的 4 KiB boot 区，再复位交由 ROM ISP 接管。擦除前 Host 关闭 USB，Device 停止 PA0/PA1 UART 并释放引脚。ISP 超时后使用完整 HEX（含 boot stub）重新烧录以恢复应用。
 
 PA3 指示规则：未连接时约 1 Hz 闪烁，连接后角色灯常亮；有 USB/RF 有效数据时约 50 ms 切换到另一只 LED，随后恢复角色灯。Host 使用输出高电平对应的 LED，Device 使用输出低电平对应的 LED，浮空时两灯熄灭。
 
