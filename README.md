@@ -22,8 +22,8 @@ Host通过USB连接电脑，Device通过UART连接目标MCU，两端以 2.4GHz R
 
 ## 项目链接
 
-项目仓库：[Github: sleep4at/DevLink](https://github.com/sleep4at/DevLink)
-
+- 项目仓库：[Github: sleep4at/DevLink](https://github.com/sleep4at/DevLink)
+- 视频链接：没拍呢（
 
 
 <br>
@@ -31,7 +31,7 @@ Host通过USB连接电脑，Device通过UART连接目标MCU，两端以 2.4GHz R
 
 ## 功能特性
 
-- **无线串口桥接**：电脑与目标MCU双向收发串口数据，Host将串口配置同步到Device。
+- **无线串口桥接**：电脑与目标MCU通过DevLink可实现无线双向收发串口数据，同时支持无线串口烧录。
 - **远程BOOT/RESET控制**：Host发起下载请求，Device按配置好的时序控制目标MCU；外部可调的BOOT电平输出；适用STM32 Bootloader的场景会发送同步字节 `0x7F`。
 - **接收反压与重传保护**：接收端反馈可用额度，缓冲区不足时拒绝确认，降低拥塞时静默丢包的风险。
 - **Self-Boot**：Host、Device都可通过PROG按键进入各自的ROM ISP；此操作会擦除启动区，让下次上电直接进入ISP模式，方便使用USB烧录新固件。
@@ -57,12 +57,6 @@ flowchart LR
     Host -. ISP请求 .-> Device
     Device -. BOOT/RST .-> MCU
 ```
-
-Host负责USB与电脑连接；Device负责目标MCU的串口及BOOT/RESET控制。
-
-数据从电脑发出后，依次经过Host USB、RF链路和Device UART到达目标MCU；反向数据按相反方向返回。串口波特率等配置也会从Host同步到Device。
-
-接收端会报告可接收额度，缓冲区不足时通过拒绝确认促使发送端重试。
 
 <br>
 <p align="center">
@@ -178,19 +172,26 @@ wchisp -s -p /dev/ttyUSBx -b Baud115200 flash Device.hex
 
 > 遇到问题无法烧录或设备无法正常工作，优先检查接线和焊接~
 
-### 1. USB烧录无反应或显示未知设备
+### 1. PCB打板板厚、物料、焊接
+- PCB板厚1.0mm，双层板。
+- 原理图已校对BOM表，可直接导出BOM表下单，立创商城可直接购买，且项目使用的大多数器件可以使用16-15的器件券。
+- 关于LED颜色，作者使用的0402 LED颜色为暖白和普绿，原理图中LED颜色为正白和普绿。可按照自己喜好选择LED颜色。
+- 6P插座使用的线材是1.25转2.54杜邦线，相关购买链接已放在附件内的`物料购买说明.txt`，按需参考。
+- 因板上有QFN封装器件，需要使用热风枪或加热台。当使用电烙铁对CH570Q的引脚进行拖焊时，6P座子可能会阻挡烙铁头移动，建议最后再焊接座子。
+ 
 
-- 烧录前，确认当前设备芯片处于空片或无启动分区状态。<br>
-- 如果6P接口插着杜邦线，杜邦线另一端不要插任何设备或单片机，因为串口与USB共用一组IO，会影响USB通信。<br>
-- 最好将1.27转2.54杜邦线拔除再尝试USB烧录。<br>
-- 有些tb商家卖的芯片可能带程序，只能尝试使用串口免按键烧录，烧录时勾选“清空Codeflash”。<br>
+### 2. 烧录无反应或显示未知USB设备
+- 烧录前，确认当前设备芯片处于空片或无启动分区状态。
+- 串口烧录注意接线，和常规串口通信的交叉接线不同，烧录接线是tx对tx，rx对rx。
+- 使用USB烧录时，如果6P接口插着杜邦线，杜邦线另一端不要插任何设备或单片机，因为串口与USB共用一组IO，会影响USB通信。
+- 最好将1.25转2.54杜邦线拔除再尝试USB烧录。
+- 有些tb商家卖的芯片可能带程序，只能尝试使用串口免按键烧录，烧录时勾选`清空Codeflash`。
+ 
 
-### 2. Linux无法枚举USB或打开串口提示“输入/输出错误”
-
-Host正常运行时使用CH341兼容USB接口，Linux通常由内核 `ch341` 驱动创建 `/dev/ttyUSB*`。<br>
+### 3. Linux无法枚举USB或打开串口提示“输入/输出错误”
+- Host正常运行时Linux通常由内核 ch341 驱动创建 /dev/ttyUSB*。
 若设备已枚举但打开串口超时或报I/O错误，检查USB自动挂起设置：为VID:PID `1a86:7523` 配置 `power/control=on`；使用TLP时也将该设备加入USB自动挂起黑名单。<br><br>
 <!-- 详细说明见 [Linux USB适配说明](RF/LINUX_USB_FIX.md)。 -->
-<!-- 建议使用 `/dev/serial/by-id/` 下的设备路径，避免插拔后 `/dev/ttyUSB*` 编号变化。 -->
 
 *待发现......*
 
